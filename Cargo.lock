@@ -390,7 +390,9 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "bf-core",
+ "filetime",
  "parking_lot",
+ "rayon",
  "rusqlite",
  "serde",
  "serde_json",

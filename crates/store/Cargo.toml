@@ -17,7 +17,9 @@ rusqlite.workspace = true
 zstd.workspace = true
 parking_lot.workspace = true
 tokio.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
+filetime.workspace = true
 tempfile.workspace = true
 tokio = { version = "1", features = ["full", "test-util"] }

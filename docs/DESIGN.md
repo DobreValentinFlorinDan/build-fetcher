@@ -289,6 +289,8 @@ agreement, and write each change in the hand-over section of this file.
 
 ## Hand-over log
 
+- (user, 2026-11-24) Confirmed: the overlay shows several ranked options with their evidence. It never gives a single
+  instruction and never pops up or alerts.
 - (lead) Copy of irelia-companion 2.2.0 committed verbatim (04f0b5e). The next commit trims it to the reusable
   engineering, adds the contract, and adds the store and learn skeletons. Server, desktop and tauri are not yet in
   the workspace members; Agent C restores them.

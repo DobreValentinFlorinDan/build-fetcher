@@ -208,10 +208,6 @@ impl Store {
         self.drops.lock().iter().map(|(d, n)| (d.as_str().to_string(), *n)).collect()
     }
 
-    pub(crate) fn count_drop(&self, d: Drop, n: u64) {
-        *self.drops.lock().entry(d).or_default() += n;
-    }
-
     /// Was this match id processed already (counted, kept, in validation or dropped)?
     pub fn is_seen(&self, match_id: &str) -> Result<bool> {
         let r = self.r.lock();

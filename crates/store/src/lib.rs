@@ -26,3 +26,4 @@ pub use parse::Drop;
 
 pub use settings::Settings;
 pub use store::{Baseline, Ingest, Outcome, Store, StoreOptions};
+pub use scheduler::{Fetcher, FetcherConfig, Work};

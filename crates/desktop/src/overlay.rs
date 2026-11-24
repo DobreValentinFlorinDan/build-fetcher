@@ -45,12 +45,12 @@ pub fn initial_position(saved: Option<OverlayBounds>, displays: &[Area], primary
             return (s.x, s.y);
         }
     }
-    (primary.x + primary.width - WIDTH - 24.0, primary.y + irelia::js::round(primary.height * 0.18))
+    (primary.x + primary.width - WIDTH - 24.0, primary.y + bf_core::js::round(primary.height * 0.18))
 }
 
 /// `fitHeight`: the HUD reports its rendered height; the window follows within bounds. None for a non-number.
 pub fn fit_height(px: f64) -> Option<f64> {
-    px.is_finite().then(|| irelia::js::round(px).clamp(MIN_H, MAX_H))
+    px.is_finite().then(|| bf_core::js::round(px).clamp(MIN_H, MAX_H))
 }
 
 #[cfg(test)]

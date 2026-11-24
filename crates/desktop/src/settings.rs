@@ -1,9 +1,9 @@
-//! Port of `desktop/settings.ts` and the shapes of `shared/desktop.ts`: the desktop settings, kept under `desktop` in
-//! %APPDATA%/irelia-companion/config.json, merged over the defaults. A patch from a page is untrusted: every field is
+//! From irelia-companion's `desktop/settings.ts`: the desktop settings, kept under `desktop` in
+//! %APPDATA%/build-fetcher/settings.json, merged over the defaults. A patch from a page is untrusted: every field is
 //! validated, and a field that isn't valid falls back to its default.
 
-use irelia::app_config::{read_app_config, update_app_config};
-use irelia::js;
+use bf_core::app_config::{read_app_config, update_app_config};
+use bf_core::js;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -42,7 +42,7 @@ pub struct DesktopSettings {
     /// Accelerators. Registered only while a game is running, so they never shadow other apps.
     pub hotkeys: Hotkeys,
     pub close_to_tray: bool,
-    /// Windows doesn't go to sleep while fetching runs, or an evaluation you started (0.19.0).
+    /// Windows doesn't go to sleep while fetching runs.
     pub keep_awake_while_fetching: bool,
     /// ...and the screen stays on too.
     pub keep_screen_on_while_fetching: bool,
@@ -168,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_in_the_same_form_as_0_22() {
+    fn saved_form() {
         let mut s = defaults();
         assert_eq!(
             js::stringify(&s.to_value()),

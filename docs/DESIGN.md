@@ -292,3 +292,24 @@ agreement, and write each change in the hand-over section of this file.
 - (lead) Copy of irelia-companion 2.2.0 committed verbatim (04f0b5e). The next commit trims it to the reusable
   engineering, adds the contract, and adds the store and learn skeletons. Server, desktop and tauri are not yet in
   the workspace members; Agent C restores them.
+- (Agent B) `crates/learn` delivered. **Contract change (additions only):** `DamageProfile::magic_share_of(data,
+  champion)`, `DamageProfile::magic_share(data, champions)`, `DamageProfile::from_magic_share(share)` and
+  `DamageProfile::of_team(data, champions)` in `crates/core/src/build.rs`. A champion's magic share is
+  magic² / (attack² + magic²) from Data Dragon's 0-10 ratings; a team is Magic at ≥ 0.65, Physical at ≤ 0.35.
+  **The store should compute `CountContext::enemy_profile` with `DamageProfile::of_team`** so counts and the learner
+  mean the same thing. Nothing renamed or removed.
+  - What the server calls: `Learner::open(dir, static_data, LearnConfig)`; `learner.train_step(&dyn DataSource,
+    &Budget { max_records, deadline, activity })` in the background (it returns `NotIdle` unless `activity()` is
+    `Idle`, and stops between mini-batches when it changes, the deadline passes or `learner.interrupt()` is called);
+    `learner.status() -> ModelStatus`; `learner.rollback(version)`; `learner.set_learning(bool)`;
+    `Recommender::new(Arc<dyn DataSource>, Some(learner), static_data, RecommendConfig)` as `Arc<dyn BuildSource>`.
+    `LearnConfig::use_gpu` is the Settings switch. `Learner::disk_bytes()` is Storage's "checkpoints".
+  - The checkpoint directory (`data/checkpoints/`) holds `manifest.json`, `vNNNNNN.logistic.bin` /
+    `vNNNNNN.shared-nn.bin` (zstd), `contexts.bin` and `learning.log`. The store's clean-up must keep it.
+  - The cursor is `records_after`'s sequence number: records are read once. A rejected update still advances it.
+  - Tier A ranks the pre-game decisions (runes, summoners, skill max, starting items) by the model; the item path is
+    ranked by counts in both tiers (the model's item effects are conditional on game state, which `live` uses).
+  - Measurements and what was not verified: docs/MEASUREMENTS.md, "Learning".
+  - Open points for the lead: the strict guardrail (log loss and Brier may not rise at all) rejects most updates once
+    the model has converged; consider `Guardrail::log_loss_slack` ≈ 1e-4 or a larger validation sample. bf-core has
+    no GPU kernel for the training forward pass, so only the recommender's similarities can run on a GPU.

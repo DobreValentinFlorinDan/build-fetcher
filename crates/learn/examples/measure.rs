@@ -48,6 +48,8 @@ fn main() -> anyhow::Result<()> {
     println!("validation examples: {}", val.len());
     let base = evaluate(&baseline_predictions(src.as_ref(), &val)?, &val);
     println!("baseline (champion-role win rate): {}", fmt_metrics(&base));
+    println!("memory before training (synthetic data loaded): rss {:.0} MB, peak {:.0} MB", bf_core::sys::own_rss().unwrap_or(0) as f64 / 1_048_576.0, bf_learn::learner::peak_rss().unwrap_or(0) as f64 / 1_048_576.0);
+    println!("threads: {}", rayon::current_num_threads());
     let mut step = 0;
     loop {
         let r = learner.train_step(src.as_ref(), &Budget::records(per_step))?;

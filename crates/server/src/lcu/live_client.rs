@@ -1,8 +1,10 @@
-//! Port of `server/lcu/liveClient.ts`: the Live Client Data API (https://127.0.0.1:2999/liveclientdata/allgamedata),
-//! the performance tracker (CS, vision, the gold model) and the poller.
+//! From irelia-companion's `server/lcu/liveClient.ts`: the Live Client Data API
+//! (https://127.0.0.1:2999/liveclientdata/allgamedata) and the performance tracker (CS, vision, the gold model).
+//!
+//! The Live Client names every player; names are used here only to find the user and to credit events to a team.
+//! Nothing that leaves this module for the dashboard holds a name: champions only.
 
-use irelia::engine::adaptive::identify;
-use irelia::js;
+use bf_core::js;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -29,7 +31,7 @@ const HISTORY_EVERY_S: f64 = 15.0;
 const HISTORY_MAX: usize = 240;
 
 fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
-    irelia::model::logistic::js_min(hi, irelia::model::logistic::js_max(lo, x))
+    bf_core::js::js_min(hi, bf_core::js::js_max(lo, x))
 }
 fn norm(s: Option<&str>) -> String {
     s.unwrap_or("").trim().to_lowercase()
@@ -40,6 +42,28 @@ fn s<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
 fn f(v: &Value) -> f64 {
     v.as_f64().unwrap_or(0.0)
 }
+/// The user (`activePlayer`) and the lane opponent among `allPlayers`: the enemy with `opponent_name`'s champion when
+/// given, else the enemy in the same position.
+pub fn identify(raw: &Value, opponent_name: Option<Option<&str>>) -> (Option<usize>, Option<usize>) {
+    let players = raw["allPlayers"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    let ap = &raw["activePlayer"];
+    let me_id = s(ap, "riotId").or_else(|| s(ap, "summonerName"));
+    let me = players.iter().position(|p| me_id.is_some() && s(p, "riotId").or_else(|| s(p, "summonerName")) == me_id).or_else(|| {
+        let gn = s(ap, "riotIdGameName").filter(|g| !g.is_empty())?;
+        players.iter().position(|p| s(p, "riotIdGameName") == Some(gn))
+    });
+    let opponent = me.and_then(|m| {
+        let my = &players[m];
+        match opponent_name {
+            Some(name) => players.iter().position(|p| p["team"] != my["team"] && name.is_some() && s(p, "championName") == name),
+            None => players.iter().position(|p| {
+                p["team"] != my["team"] && s(p, "position").map(|x| !x.is_empty()).unwrap_or(false) && p["position"] == my["position"]
+            }),
+        }
+    });
+    (me, opponent)
+}
+
 pub fn player_key(p: &Value) -> String {
     s(p, "riotId").or_else(|| s(p, "summonerName")).or_else(|| s(p, "championName")).unwrap_or("").to_string()
 }
@@ -73,7 +97,7 @@ pub fn event_income(players: &[Value], events: &[Value]) -> Option<HashMap<Strin
     let mut death_streak: HashMap<String, f64> = HashMap::new();
     let (mut kills, mut resolved) = (0.0, 0.0);
     let mut sorted: Vec<&Value> = events.iter().collect();
-    sorted.sort_by(|a, b| irelia::engine::recommend::js_order(f(&a["EventTime"]) - f(&b["EventTime"])));
+    sorted.sort_by(|a, b| bf_core::js::js_order(f(&a["EventTime"]) - f(&b["EventTime"])));
     for e in sorted {
         let killer = find(s(e, "KillerName"));
         let assisters: Vec<usize> = e["Assisters"].as_array().map(|a| a.iter().filter_map(|x| find(x.as_str())).collect()).unwrap_or_default();
@@ -86,7 +110,7 @@ pub fn event_income(players: &[Value], events: &[Value]) -> Option<HashMap<Strin
                 let streak = kill_streak.get(&vk).copied().unwrap_or(0.0);
                 let deaths = death_streak.get(&vk).copied().unwrap_or(0.0);
                 let bounty = clamp(
-                    (gold::KILL + gold::STREAK_BONUS * irelia::model::logistic::js_max(0.0, streak - 1.0)) * irelia::jsmath::pow(gold::DEATH_STREAK_FACTOR, deaths),
+                    (gold::KILL + gold::STREAK_BONUS * bf_core::js::js_max(0.0, streak - 1.0)) * bf_core::jsmath::pow(gold::DEATH_STREAK_FACTOR, deaths),
                     gold::MIN_BOUNTY,
                     gold::MAX_BOUNTY,
                 );
@@ -141,7 +165,7 @@ fn kda_income(p: &Value) -> f64 {
 }
 
 pub fn model_income(p: &Value, game_time: f64, from_events: Option<&HashMap<String, f64>>) -> f64 {
-    let passive = irelia::model::logistic::js_max(0.0, game_time - gold::PASSIVE_FROM) * gold::PASSIVE_PER_SEC;
+    let passive = bf_core::js::js_max(0.0, game_time - gold::PASSIVE_FROM) * gold::PASSIVE_PER_SEC;
     let combat = match from_events {
         Some(m) => m.get(&player_key(p)).copied().unwrap_or(0.0),
         None => kda_income(p),
@@ -153,7 +177,7 @@ fn items(p: &Value) -> Vec<(i64, f64)> {
     p["items"].as_array().map(|a| a.iter().map(|i| (i["itemID"].as_i64().unwrap_or(0), i["count"].as_f64().unwrap_or(f64::NAN))).collect()).unwrap_or_default()
 }
 fn count(c: f64) -> f64 {
-    irelia::model::logistic::js_max(1.0, if c.is_nan() { 1.0 } else { c })
+    bf_core::js::js_max(1.0, if c.is_nan() { 1.0 } else { c })
 }
 
 pub fn inventory_value(p: &Value, price_of: &dyn Fn(i64) -> f64) -> f64 {
@@ -197,7 +221,7 @@ impl PerformanceTracker {
             self.last_sample_t = None;
         }
         self.opponent_name = Some(against);
-        let minutes = irelia::model::logistic::js_max(t / 60.0, 1.0 / 60.0);
+        let minutes = bf_core::js::js_max(t / 60.0, 1.0 / 60.0);
         let events: Vec<Value> = raw["events"]["Events"].as_array().cloned().unwrap_or_default();
         let income = event_income(&players, &events);
         for p in &players {
@@ -237,7 +261,7 @@ impl PerformanceTracker {
             let mut ob = base(o);
             let ig = f(&ob["itemGold"]);
             let mg = f(&ob["modelGold"]);
-            let net_worth = js::round(irelia::model::logistic::js_max(ig, mg * calibration));
+            let net_worth = js::round(bf_core::js::js_max(ig, mg * calibration));
             let unspent = net_worth - ig;
             ob.insert("unspentGold".into(), js::num(unspent));
             ob.insert("netWorth".into(), js::num(net_worth));

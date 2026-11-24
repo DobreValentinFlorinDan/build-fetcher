@@ -1,5 +1,5 @@
-//! Port of `server/lcu/simulateLive.ts`: synthetic Live Client data for POST /api/dev/simulate-live (Irelia vs Darius
-//! top, or vs Syndra mid; one game minute per 6 real seconds; {positions: false} leaves positions empty).
+//! From irelia-companion's `server/lcu/simulateLive.ts`: synthetic Live Client data for POST /api/dev/simulate-live (any
+//! champion, top vs Darius or mid vs Syndra; ten game seconds per tick; {positions: false} leaves positions empty).
 
 use serde_json::{json, Value};
 
@@ -8,14 +8,14 @@ type Seat = (&'static str, &'static str, &'static str, &'static str);
 fn roster(lane: &str) -> [Seat; 10] {
     if lane == "MIDDLE" {
         [
-            ("You", "Irelia", "ORDER", "MIDDLE"), ("Ally Top", "Ornn", "ORDER", "TOP"), ("Ally Jungle", "LeeSin", "ORDER", "JUNGLE"),
+            ("You", "", "ORDER", "MIDDLE"), ("Ally Top", "Ornn", "ORDER", "TOP"), ("Ally Jungle", "LeeSin", "ORDER", "JUNGLE"),
             ("Ally Bot", "Jinx", "ORDER", "BOTTOM"), ("Ally Support", "Thresh", "ORDER", "UTILITY"),
             ("Enemy Top", "Darius", "CHAOS", "TOP"), ("Enemy Jungle", "Vi", "CHAOS", "JUNGLE"), ("Enemy Mid", "Syndra", "CHAOS", "MIDDLE"),
             ("Enemy Bot", "Kaisa", "CHAOS", "BOTTOM"), ("Enemy Support", "Nautilus", "CHAOS", "UTILITY"),
         ]
     } else {
         [
-            ("You", "Irelia", "ORDER", "TOP"), ("Ally Jungle", "LeeSin", "ORDER", "JUNGLE"), ("Ally Mid", "Ahri", "ORDER", "MIDDLE"),
+            ("You", "", "ORDER", "TOP"), ("Ally Jungle", "LeeSin", "ORDER", "JUNGLE"), ("Ally Mid", "Ahri", "ORDER", "MIDDLE"),
             ("Ally Bot", "Jinx", "ORDER", "BOTTOM"), ("Ally Support", "Thresh", "ORDER", "UTILITY"),
             ("Enemy Top", "Darius", "CHAOS", "TOP"), ("Enemy Jungle", "Vi", "CHAOS", "JUNGLE"), ("Enemy Mid", "Syndra", "CHAOS", "MIDDLE"),
             ("Enemy Bot", "Kaisa", "CHAOS", "BOTTOM"), ("Enemy Support", "Nautilus", "CHAOS", "UTILITY"),
@@ -44,14 +44,16 @@ fn at(sched: &[(f64, &'static [i64])], t: f64) -> &'static [i64] {
 pub struct SimulatedGame {
     pub t: f64,
     lane: &'static str,
+    /// Data Dragon id or name of the user's champion.
+    champion: String,
     positions: bool,
     events: Vec<Value>,
     game_seconds_per_tick: f64,
 }
 
 impl SimulatedGame {
-    pub fn new(start_at: f64, lane: &'static str, positions: bool) -> SimulatedGame {
-        SimulatedGame { t: start_at, lane, positions, events: vec![json!({ "EventID": 0, "EventName": "GameStart", "EventTime": 0 })], game_seconds_per_tick: 10.0 }
+    pub fn new(start_at: f64, lane: &'static str, champion: &str, positions: bool) -> SimulatedGame {
+        SimulatedGame { t: start_at, lane, champion: champion.to_string(), positions, events: vec![json!({ "EventID": 0, "EventName": "GameStart", "EventTime": 0 })], game_seconds_per_tick: 10.0 }
     }
 
     fn has(&self, time: f64) -> bool {
@@ -77,6 +79,20 @@ impl SimulatedGame {
         if t >= 1020.0 && !self.has(1020.0) {
             self.kill(1020.0, "You", opponent, &[]);
         }
+        // Objectives, for the towers / dragons / barons of the live context.
+        let objectives: [(f64, Value); 4] = [
+            (600.0, json!({ "EventName": "DragonKill", "DragonType": "Fire", "KillerName": "Ally Jungle", "Assisters": [], "Stolen": "False" })),
+            (840.0, json!({ "EventName": "TurretKilled", "TurretKilled": "Turret_T2_L_03_A", "KillerName": "Minion_T1L0S12N0128", "Assisters": [] })),
+            (960.0, json!({ "EventName": "TurretKilled", "TurretKilled": "Turret_T1_R_03_A", "KillerName": "Enemy Bot", "Assisters": [] })),
+            (1260.0, json!({ "EventName": "DragonKill", "DragonType": "Earth", "KillerName": "Enemy Jungle", "Assisters": [], "Stolen": "False" })),
+        ];
+        for (at_t, mut e) in objectives {
+            if t >= at_t && !self.has(at_t) {
+                e["EventID"] = json!(self.events.len());
+                e["EventTime"] = json!(at_t);
+                self.events.push(e);
+            }
+        }
         let min = t / 60.0;
         let kills = |e: &Value, key: &str, name: &str| e["EventName"] == "ChampionKill" && e[key] == name;
         let players: Vec<Value> = roster(self.lane)
@@ -87,7 +103,7 @@ impl SimulatedGame {
                 let cs_rate = if *position == "UTILITY" { 1.2 } else if me { 8.1 } else if opp { 7.2 } else { 6.5 };
                 let items: &[i64] = if me { at(ME_ITEMS, t) } else if opp { at(if self.lane == "MIDDLE" { OPP_MID } else { OPP_TOP }, t) } else { &[] };
                 json!({
-                    "championName": champion, "riotId": format!("{name}#SIM"), "riotIdGameName": name, "summonerName": format!("{name}#SIM"),
+                    "championName": if me { self.champion.as_str() } else { *champion }, "riotId": format!("{name}#SIM"), "riotIdGameName": name, "summonerName": format!("{name}#SIM"),
                     "team": team, "position": if self.positions { *position } else { "" },
                     "level": f64::min(18.0, 1.0 + (min / 1.4).floor()),
                     "items": items.iter().enumerate().map(|(slot, id)| json!({ "itemID": id, "count": 1, "slot": slot })).collect::<Vec<_>>(),
@@ -96,7 +112,7 @@ impl SimulatedGame {
                         "deaths": self.events.iter().filter(|e| kills(e, "VictimName", name)).count(),
                         "assists": self.events.iter().filter(|e| e["EventName"] == "ChampionKill" && e["Assisters"].as_array().map(|a| a.iter().any(|x| x == name)).unwrap_or(false)).count(),
                         "creepScore": f64::max(0.0, ((min - 1.5) * cs_rate).floor()),
-                        "wardScore": irelia::js::num(irelia::js::round(min * if me { 0.75 } else { 0.6 } * 10.0) / 10.0),
+                        "wardScore": bf_core::js::num(bf_core::js::round(min * if me { 0.75 } else { 0.6 } * 10.0) / 10.0),
                     },
                 })
             })

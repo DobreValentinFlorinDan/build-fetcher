@@ -1,21 +1,21 @@
 [package]
-name = "irelia-companion"
+name = "build-fetcher"
 version.workspace = true
 edition.workspace = true
 publish = false
-description = "Irelia Companion's desktop app: the server in-process, the dashboard and the in-game overlay in WebView2, the tray."
+description = "Build Fetcher's desktop app: the server in-process, the dashboard and the in-game overlay in WebView2, the tray."
 
 [[bin]]
-name = "irelia-companion"
+name = "build-fetcher"
 path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-irelia = { path = "../../crates/core" }
-irelia-server = { path = "../../crates/server" }
-irelia-desktop = { path = "../../crates/desktop" }
+bf-core = { path = "../../crates/core" }
+bf-server = { path = "../../crates/server" }
+bf-desktop = { path = "../../crates/desktop" }
 tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2.5"
 tauri-plugin-global-shortcut = "2.4"

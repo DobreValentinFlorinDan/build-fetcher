@@ -1,4 +1,4 @@
-//! Port of `server/gameMode.ts`: champ select and games. While one is on, the app runs at below-normal priority, so
+//! From irelia-companion's `server/gameMode.ts`: champ select and games. While one is on, the app runs at below-normal priority, so
 //! the game's threads win every contest for a core; when champ select starts, the memory the app no longer touches is
 //! handed back to the system (Windows: the working-set trim). A trim that frees under 50 MB isn't done again that
 //! session: the pages come back as soon as they are touched. (0.x also collected every thread's garbage first; Rust has
@@ -23,9 +23,9 @@ impl Default for GameModeDeps {
     fn default() -> Self {
         GameModeDeps {
             set_priority: Box::new(set_priority),
-            rss: Box::new(|| irelia::sys::own_rss().unwrap_or(0)),
+            rss: Box::new(|| bf_core::sys::own_rss().unwrap_or(0)),
             trim: Box::new(trim),
-            log: Box::new(|l| eprintln!("{l}")),
+            log: Box::new(crate::logging::line),
         }
     }
 }

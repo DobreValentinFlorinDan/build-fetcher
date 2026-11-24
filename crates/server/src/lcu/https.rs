@@ -1,4 +1,4 @@
-//! Port of `server/lcu/https.ts`: the League client and the Live Client API serve a Riot self-signed certificate on
+//! From irelia-companion's `server/lcu/https.ts`: the League client and the Live Client API serve a Riot self-signed certificate on
 //! 127.0.0.1 only. Certificate checks are off for these loopback requests exclusively (never for anything else).
 
 use anyhow::{anyhow, Result};
@@ -33,12 +33,12 @@ pub async fn loopback_json(port: u16, path: &str, auth: Option<&str>, timeout_ms
     Ok(serde_json::from_str(&text)?)
 }
 
-/// A write to the League client (Stage C import). An empty answer (204) is Null.
+/// A write to the League client (the import). An empty answer (204) is Null.
 pub async fn loopback_request(port: u16, method: &str, path: &str, auth: &str, body: Option<&Value>, timeout_ms: u64) -> Result<Value> {
     let m = reqwest::Method::from_bytes(method.as_bytes())?;
     let mut req = LOOPBACK.request(m, url(port, path)).header("Accept", "application/json").header("Authorization", auth).timeout(Duration::from_millis(timeout_ms));
     if let Some(b) = body {
-        req = req.header("Content-Type", "application/json").body(irelia::js::stringify(b));
+        req = req.header("Content-Type", "application/json").body(bf_core::js::stringify(b));
     }
     let res = req.send().await?;
     let status = res.status().as_u16();

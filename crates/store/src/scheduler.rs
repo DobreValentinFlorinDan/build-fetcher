@@ -8,9 +8,10 @@
 //! Each worker picks its next piece of work in this order (`plan`):
 //! 1. the user's own new games (on their platform), every `my_games_every_ms` and right after a game ends;
 //! 2. tier A champions: players seen on a tier A champion-role whose history wasn't checked lately;
-//! 3. thin champion-role pairs on the newest patch (fewest games first): their Master+ players, else their
-//!    Diamond players, else (widening) Diamond players in general, which is how Diamond players of the pair are
-//!    found;
+//! 3. thin champion-role pairs on the newest patch (fewest games first): their Master+ players; and once Master+
+//!    sourcing has had a fair run on the patch (`widen_after_games` Master+ games) a pair still under half the thin
+//!    threshold at Master+ is widened: its Diamond players, else Diamond players in general (the Diamond ladder),
+//!    which is how the pair's Diamond players are found;
 //! 4. popular pairs: any Master+ player of the pool not checked lately (every game feeds every pair);
 //! 5. a pool refresh (league-v4) when a pool is empty or a day old.
 //!
@@ -50,6 +51,8 @@ pub struct FetcherConfig {
     pub tier_a_patch_games: usize,
     /// The thinnest pairs looked at per plan.
     pub thin_pairs: usize,
+    /// Master+ games on the newest patch before thin pairs are widened to Diamond.
+    pub widen_after_games: u32,
     /// Wait when there is nothing to do, and after an error.
     pub idle_ms: u64,
     pub error_backoff_ms: u64,
@@ -67,6 +70,7 @@ impl Default for FetcherConfig {
             tier_a_top: 5,
             tier_a_patch_games: 3,
             thin_pairs: 40,
+            widen_after_games: 2000,
             idle_ms: 60_000,
             error_backoff_ms: 5_000,
         }
@@ -93,7 +97,6 @@ struct State {
     requests: VecDeque<i64>,
     matches: VecDeque<i64>,
     last_my_games: i64,
-    pools: HashMap<(Platform, RankBand), i64>,
     me: Option<String>,
     running: usize,
 }
@@ -307,11 +310,8 @@ impl<A: RiotApi + 'static> Fetcher<A> {
         }
         let data = store.static_data();
         let name = |c: i64| data.champion(c).map(|c| c.name.clone()).unwrap_or_else(|| c.to_string());
-        let bands: Vec<RankBand> = match s.rank_floor {
-            RankBand::Diamond => vec![RankBand::MasterPlus, RankBand::Diamond],
-            _ if s.widen_to_diamond => vec![RankBand::MasterPlus, RankBand::Diamond],
-            _ => vec![RankBand::MasterPlus],
-        };
+        let diamond_floor = s.rank_floor == RankBand::Diamond;
+        let bands: Vec<RankBand> = if diamond_floor { vec![RankBand::MasterPlus, RankBand::Diamond] } else { vec![RankBand::MasterPlus] };
         // 2. Tier A.
         let mut tier_a: Vec<i64> = self.tier_a()?.into_iter().collect();
         tier_a.sort();
@@ -329,19 +329,29 @@ impl<A: RiotApi + 'static> Fetcher<A> {
             let mut vols = store.volumes(&[patch])?;
             vols.retain(|v| v.games < store.opts.thin_games);
             vols.sort_by_key(|v| (v.games, v.champion, v.role));
+            let master_games = store.patch_games(patch, RankBand::MasterPlus)?;
+            let may_widen = s.widen_to_diamond && master_games >= cfg.widen_after_games;
+            let mut widened = None;
             for v in vols.iter().take(cfg.thin_pairs) {
+                let wide = diamond_floor || (may_widen && store.pair_games(v.champion, v.role, patch, Some(RankBand::MasterPlus))? * 2 < store.opts.thin_games);
                 for band in &bands {
                     if let Some((puuid, platform)) = store.players_for(v.champion, v.role, *band, &platforms, due, 1)?.into_iter().next() {
                         return Ok(Work::Player { puuid, platform, rank: *band, label: format!("thin: {} {}", name(v.champion), v.role.as_riot()) });
                     }
                 }
-            }
-            // Nobody known for the thinnest pair: widen to Diamond's ladder, where its players are found.
-            if let Some(v) = vols.first() {
-                if bands.contains(&RankBand::Diamond) {
-                    if let Some(w) = self.ladder_work(&platforms, RankBand::Diamond, due, now, format!("thin, widened to Diamond: {} {}", name(v.champion), v.role.as_riot()))? {
-                        return Ok(w);
+                if wide && !diamond_floor {
+                    if let Some((puuid, platform)) = store.players_for(v.champion, v.role, RankBand::Diamond, &platforms, due, 1)?.into_iter().next() {
+                        return Ok(Work::Player { puuid, platform, rank: RankBand::Diamond, label: format!("thin, widened to Diamond: {} {}", name(v.champion), v.role.as_riot()) });
                     }
+                }
+                if wide && widened.is_none() {
+                    widened = Some(v.clone());
+                }
+            }
+            // Nobody known for a widened pair yet: Diamond's ladder, where its players are found.
+            if let Some(v) = widened {
+                if let Some(w) = self.ladder_work(&platforms, RankBand::Diamond, due, now, format!("thin, widened to Diamond: {} {}", name(v.champion), v.role.as_riot()))? {
+                    return Ok(w);
                 }
             }
         }
@@ -355,14 +365,12 @@ impl<A: RiotApi + 'static> Fetcher<A> {
 
     /// A player of a ladder to check, or the ladder's refresh when it is empty or old.
     fn ladder_work(&self, platforms: &[Platform], rank: RankBand, due: i64, now: i64, label: String) -> Result<Option<Work>> {
-        let st = self.inner.st.lock();
         for p in platforms {
-            let refreshed = st.pools.get(&(*p, rank)).copied().unwrap_or(i64::MIN / 2);
+            let refreshed = self.inner.store.ladder_refreshed(*p, rank).unwrap_or(i64::MIN / 2);
             if now - refreshed >= self.inner.cfg.pool_refresh_ms {
                 return Ok(Some(Work::Pool { platform: *p, rank }));
             }
         }
-        drop(st);
         Ok(self.inner.store.due_players(platforms, rank, due, 1)?.into_iter().next().map(|(puuid, platform, _)| Work::Player { puuid, platform, rank, label }))
     }
 
@@ -509,8 +517,7 @@ impl<A: RiotApi + 'static> Fetcher<A> {
                         players.extend(list.into_iter().map(|e| (e.puuid, e.league_points)));
                     }
                 }
-                let n = self.inner.store.add_players(*platform, *rank, &players)?;
-                self.inner.st.lock().pools.insert((*platform, *rank), self.now());
+                let n = self.inner.store.add_players(*platform, *rank, &players, self.now())?;
                 self.inner.store.log(format!("ladder {} {:?}: {n} players", platform.as_str(), rank));
             }
             Work::Idle => {}

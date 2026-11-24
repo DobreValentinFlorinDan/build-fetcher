@@ -409,8 +409,8 @@ impl Store {
         Ok(outcomes)
     }
 
-    /// Records the sourcing pool: players from league pages.
-    pub fn add_players(&self, platform: bf_core::build::Platform, rank: RankBand, players: &[(String, i64)]) -> Result<usize> {
+    /// Records the sourcing pool: players from a ladder refreshed at `now_ms`.
+    pub fn add_players(&self, platform: bf_core::build::Platform, rank: RankBand, players: &[(String, i64)], now_ms: i64) -> Result<usize> {
         let mut w = self.w.lock();
         let tx = w.db.transaction()?;
         let mut n = 0;
@@ -422,8 +422,18 @@ impl Store {
                 n += st.execute(params![puuid, platform_code(Some(platform)), rank_code(Some(rank)), lp])?;
             }
         }
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![format!("ladder.{}.{}", platform.as_str(), rank_code(Some(rank))), now_ms.to_string()],
+        )?;
         tx.commit()?;
         Ok(n)
+    }
+
+    /// When a ladder was last read (None: never).
+    pub fn ladder_refreshed(&self, platform: bf_core::build::Platform, rank: RankBand) -> Option<i64> {
+        let r = self.r.lock();
+        meta_get(&r.db, &format!("ladder.{}.{}", platform.as_str(), rank_code(Some(rank)))).and_then(|v| v.parse().ok())
     }
 
     /// Players in the pool not checked since `before_ms`, least recently checked first.
@@ -477,6 +487,13 @@ impl Store {
             None => r.db.query_row("SELECT COALESCE(SUM(games), 0) FROM pairs WHERE champion = ? AND role = ? AND patch = ?", params![champion, role_code(role), patch_code(patch)], |x| x.get(0))?,
         };
         Ok(n as u32)
+    }
+
+    /// Games on a patch in a rank band (each game counts ten player rows in `pairs`).
+    pub fn patch_games(&self, patch: Patch, rank: RankBand) -> Result<u32> {
+        let r = self.r.lock();
+        let n: i64 = r.db.query_row("SELECT COALESCE(SUM(games), 0) FROM pairs WHERE patch = ? AND rank = ?", params![patch_code(patch), rank_code(Some(rank))], |x| x.get(0))?;
+        Ok((n / 10) as u32)
     }
 
     /// The user's own games: (champion, role, patch) of the user in each (from the kept Mine records).

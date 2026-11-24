@@ -122,7 +122,7 @@ fn load() -> Config {
         }
     };
     Config {
-        riot_api_key: key.or_else(|| util::env("RIOT_API_KEY")).unwrap_or_default(),
+        riot_api_key: key.unwrap_or_default(),
         port: util::env("PORT").and_then(|p| p.parse().ok()).unwrap_or(5184),
         data_dir: p.data_dir,
         db_path: p.db_path,

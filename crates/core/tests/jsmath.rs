@@ -1,6 +1,6 @@
 //! exp / log / log1p / hypot to the last bit as Electron 44 (0.22.0's runtime) computes them: the fixtures are
 //! Electron's own results, made by parity/math-fixtures.mjs. pow is the app's own, correctly rounded: its fixture's
-//! results come from 400-bit arithmetic (parity/pow-fixtures.py). A larger set, when present at $IRELIA_MATH_FIXTURES
+//! results come from 400-bit arithmetic (parity/pow-fixtures.py). A larger set, when present at $BF_MATH_FIXTURES
 //! (the same scripts with more rows), is checked too.
 use bf_core::jsmath;
 
@@ -15,7 +15,7 @@ fn same(a: f64, b: f64) -> bool {
 
 fn dirs() -> Vec<std::path::PathBuf> {
     let mut d = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")];
-    if let Ok(more) = std::env::var("IRELIA_MATH_FIXTURES") {
+    if let Ok(more) = std::env::var("BF_MATH_FIXTURES") {
         d.push(more.into());
     }
     d

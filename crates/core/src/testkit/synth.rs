@@ -348,7 +348,7 @@ impl Synth {
             let b = &builds[k];
             let win = team == winner;
             let mins = duration_s as f64 / 60.0;
-            let done = (((mins - 8.0) / 7.5).floor().max(0.0) as usize).min(b.items.len()).min(5);
+            let done = (((mins - 6.0) / 6.0).floor().max(0.0) as usize).min(b.items.len()).min(5);
             let level = ((mins * 0.62) as i64 + 1).clamp(6, 18) as usize;
             let skills = skill_order(&b.skill_max, level);
             let is_afk = afk == Some(k);
@@ -446,11 +446,11 @@ impl Synth {
                 item_events.push((r.range(9, 11) * 60_000 + r.range(0, 50_000), json!({ "type": "ITEM_PURCHASED", "participantId": pid, "itemId": b.boots })));
             }
             for (j, it) in b.items[..*done].iter().enumerate() {
-                let t = ((8.0 + 7.5 * (j as f64 + 1.0)) * 60_000.0) as i64 - r.range(0, 120_000);
+                let t = ((6.0 + 6.0 * (j as f64 + 1.0)) * 60_000.0) as i64 - r.range(0, 90_000);
                 item_events.push((t.min(duration_s * 1000 - 1000), json!({ "type": "ITEM_PURCHASED", "participantId": pid, "itemId": it })));
             }
             if *done >= 2 && r.chance(0.5) {
-                item_events.push((((8.0 + 7.5 * 2.0) * 60_000.0) as i64 + 5_000, json!({ "type": "ITEM_SOLD", "participantId": pid, "itemId": b.start[0] })));
+                item_events.push((((6.0 + 6.0 * 2.0) * 60_000.0) as i64 + 5_000, json!({ "type": "ITEM_SOLD", "participantId": pid, "itemId": b.start[0] })));
             }
         }
         item_events.sort_by_key(|e| e.0);

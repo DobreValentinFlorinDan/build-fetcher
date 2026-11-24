@@ -20,7 +20,10 @@ pub const GLOBAL: usize = 1 << GLOBAL_BITS;
 pub const PAIR: usize = 1 << PAIR_BITS;
 pub const DIM: usize = GLOBAL + PAIR;
 /// Global slots below this are the dense game-state inputs and the bias, never hashed into.
-const RESERVED: usize = 32;
+const RESERVED: usize = 40;
+const KNOT_FEATURES: usize = 8;
+/// Rows featurized at once when scoring many situations.
+const EVAL_ROWS: usize = 8192;
 const BIAS: usize = RESERVED - 1;
 
 fn profile_id(p: Option<DamageProfile>) -> i64 {
@@ -36,9 +39,22 @@ fn profile_id(p: Option<DamageProfile>) -> i64 {
 pub fn featurize(s: &Situation, out: &mut Vec<(u32, f64)>) {
     out.clear();
     out.push((BIAS as u32, 1.0));
-    for (i, x) in s.state.dense().iter().enumerate() {
-        if *x != 0.0 {
-            out.push((i as u32, *x));
+    // The game state's coefficients vary with time: each input feeds the two nearest of four time knots (5, 15, 25
+    // and 35 minutes), weighted linearly between them, so a gold lead can mean more at 25 minutes than at 8 and each
+    // calibration window gets slopes of its own without a jump between windows.
+    let st = &s.state;
+    let base = [1.0, st.gold_diff / 1000.0, st.cs_diff / 20.0, st.level_diff / 2.0, st.kill_diff / 5.0, st.tower_diff / 2.0, st.dragon_diff / 2.0, st.baron_diff];
+    let pos = ((st.minute - 5.0) / 10.0).clamp(0.0, 3.0);
+    let k0 = (pos.floor() as usize).min(2);
+    let a1 = pos - k0 as f64;
+    for (k, a) in [(k0, 1.0 - a1), (k0 + 1, a1)] {
+        if a == 0.0 {
+            continue;
+        }
+        for (f, x) in base.iter().enumerate() {
+            if *x != 0.0 {
+                out.push(((k * KNOT_FEATURES + f) as u32, x * a));
+            }
         }
     }
     let role = s.role.map(|r| r.index() as i64).unwrap_or(5);
@@ -53,52 +69,62 @@ pub fn featurize(s: &Situation, out: &mut Vec<(u32, f64)>) {
         let h = hash(&all);
         ((GLOBAL as u64 + (h >> 1) % PAIR as u64) as u32, if h & 1 == 1 { v } else { -v })
     };
+    // Decisions made before the game (and the draft itself) also get an early-game copy that fades out by minute 20.
+    // Their effect works mostly through the leads they build, which the game state then shows: the plain copy learns
+    // what they add given the state, the early copy their whole effect (what the recommender ranks them by, at minute 0).
+    let early = (1.0 - s.state.minute / 20.0).max(0.0);
+    let pre = |out: &mut Vec<(u32, f64)>, f: (u32, f64), e: (u32, f64)| {
+        out.push(f);
+        if early > 0.0 {
+            out.push((e.0, e.1 * early));
+        }
+    };
     out.push(g(&[1, role]));
-    out.push(g(&[2, s.champion, role]));
-    out.push(g(&[20, prof]));
+    pre(out, g(&[2, s.champion, role]), g(&[102, s.champion, role]));
+    pre(out, g(&[20, prof]), g(&[120, prof]));
     out.push(p(&[0], 1.0));
     out.push(p(&[1], s.state.minute / 10.0));
     out.push(p(&[20, prof], 1.0));
     if opp != 0 {
-        out.push(g(&[3, opp, role]));
-        out.push(p(&[3, opp], 1.0));
+        pre(out, g(&[3, opp, role]), g(&[103, opp, role]));
+        pre(out, p(&[3, opp], 1.0), p(&[103, opp], 1.0));
     }
     for e in &s.enemies {
-        out.push(g(&[4, *e]));
+        pre(out, g(&[4, *e]), g(&[104, *e]));
         out.push(p(&[4, *e], 1.0));
     }
     for a in &s.allies {
-        out.push(g(&[5, *a]));
+        pre(out, g(&[5, *a]), g(&[105, *a]));
     }
     if s.keystone != 0 {
-        out.push(g(&[6, s.keystone]));
-        out.push(p(&[6, s.keystone], 1.0));
+        pre(out, g(&[6, s.keystone]), g(&[106, s.keystone]));
+        pre(out, p(&[6, s.keystone], 1.0), p(&[106, s.keystone], 1.0));
         if opp != 0 {
-            out.push(g(&[17, s.keystone, opp]));
-            out.push(p(&[17, s.keystone, opp], 1.0));
+            pre(out, g(&[17, s.keystone, opp]), g(&[117, s.keystone, opp]));
+            pre(out, p(&[17, s.keystone, opp], 1.0), p(&[117, s.keystone, opp], 1.0));
         }
     }
     if page != 0 {
-        out.push(g(&[7, page]));
-        out.push(p(&[7, page], 1.0));
+        pre(out, g(&[7, page]), g(&[107, page]));
+        pre(out, p(&[7, page], 1.0), p(&[107, page], 1.0));
         if opp != 0 {
-            out.push(p(&[18, page, opp], 1.0));
+            pre(out, p(&[18, page, opp], 1.0), p(&[118, page, opp], 1.0));
         }
     }
     if s.sub_style != 0 {
         out.push(g(&[8, s.sub_style]));
     }
     if let Some(k) = s.summoners.as_deref() {
-        out.push(g(&[9, key_id(k)]));
-        out.push(p(&[9, key_id(k)], 1.0));
+        pre(out, g(&[9, key_id(k)]), g(&[109, key_id(k)]));
+        pre(out, p(&[9, key_id(k)], 1.0), p(&[109, key_id(k)], 1.0));
     }
     if let Some(k) = s.skill_max.as_deref() {
-        out.push(g(&[10, key_id(k)]));
-        out.push(p(&[10, key_id(k)], 1.0));
+        pre(out, g(&[10, key_id(k)]), g(&[110, key_id(k)]));
+        pre(out, p(&[10, key_id(k)], 1.0), p(&[110, key_id(k)], 1.0));
     }
     if let Some(k) = s.starting.as_deref() {
-        out.push(g(&[11, key_id(k)]));
-        out.push(p(&[11, key_id(k)], 1.0));
+        pre(out, g(&[11, key_id(k)]), g(&[111, key_id(k)]));
+        pre(out, p(&[11, key_id(k)], 1.0), p(&[111, key_id(k)], 1.0));
     }
     for (pos, it) in s.items.iter().enumerate() {
         out.push(g(&[12, *it]));
@@ -127,11 +153,13 @@ pub struct TrainOptions {
     pub l2_pair: f64,
     pub batch: usize,
     pub epochs: usize,
+    /// Epochs of the very first update (no model yet): it has to beat the baseline from one batch of records.
+    pub cold_epochs: usize,
 }
 
 impl Default for TrainOptions {
     fn default() -> Self {
-        TrainOptions { learning_rate: 0.01, beta1: 0.9, beta2: 0.999, l2_global: 1e-4, l2_pair: 3e-3, batch: 512, epochs: 2 }
+        TrainOptions { learning_rate: 0.003, beta1: 0.9, beta2: 0.999, l2_global: 1e-2, l2_pair: 3e-2, batch: 512, epochs: 2, cold_epochs: 6 }
     }
 }
 
@@ -173,9 +201,11 @@ impl LogisticModel {
 
     /// Logits of many situations through `backend` (the evaluation's forward pass).
     pub fn logits(&self, xs: &[&Situation], backend: &dyn Backend) -> Vec<f64> {
-        let csr = to_csr(xs);
+        // In slices, so the sparse rows of a whole training set never sit in memory at once.
         let mut out = vec![0.0; xs.len()];
-        backend.logits(&csr, &self.w, &mut out);
+        for (c, o) in xs.chunks(EVAL_ROWS).zip(out.chunks_mut(EVAL_ROWS)) {
+            backend.logits(&to_csr(c), &self.w, o);
+        }
         out
     }
 
@@ -196,7 +226,8 @@ impl LogisticModel {
                 *self.pair_samples.entry((s.champion, r.index() as u8)).or_insert(0) += 1;
             }
         }
-        for _ in 0..o.epochs {
+        let epochs = if self.t == 0 { o.cold_epochs.max(o.epochs) } else { o.epochs };
+        for _ in 0..epochs {
             for chunk in order.chunks(o.batch.max(1)) {
                 if stop() {
                     return Err(batches);
@@ -247,17 +278,25 @@ impl LogisticModel {
 
 /// Situations as sparse rows (featurized in parallel; `collect` keeps the order).
 pub fn to_csr(xs: &[&Situation]) -> Csr {
-    let rows: Vec<Vec<(u32, f64)>> = xs
-        .par_iter()
-        .map(|s| {
-            let mut f = Vec::with_capacity(96);
-            featurize(s, &mut f);
-            f
+    // Featurized in parallel per slice of rows (each slice in order), then concatenated in order.
+    let parts: Vec<Csr> = xs
+        .par_chunks(256)
+        .map(|c| {
+            let mut csr = Csr::new();
+            let mut f = Vec::with_capacity(128);
+            for s in c {
+                featurize(s, &mut f);
+                csr.push_row(&f);
+            }
+            csr
         })
         .collect();
     let mut csr = Csr::new();
-    for r in &rows {
-        csr.push_row(r);
+    for p in parts {
+        let at = csr.idx.len();
+        csr.idx.extend_from_slice(&p.idx);
+        csr.val.extend_from_slice(&p.val);
+        csr.ptr.extend(p.ptr[1..].iter().map(|x| x + at));
     }
     csr
 }

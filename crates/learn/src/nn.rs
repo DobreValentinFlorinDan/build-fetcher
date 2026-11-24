@@ -1,8 +1,9 @@
 //! Model step 2: a small network shared by every champion, on top of step 1.
 //!
 //! Inputs are embeddings (champions, items, runes, summoners and skill orders, 8 numbers each), their products for
-//! the interactions a linear model can't express (this champion with these items, this opponent with this keystone,
-//! these items against this damage profile), the role and profile, and the game state. Two tanh layers (32, 16)
+//! the interactions a linear model can't express (this champion with these items, with these allies and against
+//! these enemies, this opponent with this keystone, these items against this damage profile), the role and profile,
+//! and the game state. Two tanh layers (32, 16)
 //! give one number that is added to step 1's logit. The last layer starts at zero, so a fresh network predicts
 //! exactly like step 1 and only ships once it has learnt something that beats it on held-out games.
 //!
@@ -19,7 +20,7 @@ const CH: usize = 1024;
 const IT: usize = 4096;
 const RU: usize = 512;
 const MI: usize = 256;
-const BLOCKS: usize = 14;
+const BLOCKS: usize = 16;
 const EXTRA: usize = 5 + 3 + DENSE + 2;
 pub const IN: usize = BLOCKS * E + EXTRA;
 pub const H1: usize = 32;
@@ -49,12 +50,14 @@ pub struct NetOptions {
     pub l2: f64,
     pub batch: usize,
     pub epochs: usize,
+    /// Epochs of the first update of a fresh network.
+    pub cold_epochs: usize,
     pub seed: u64,
 }
 
 impl Default for NetOptions {
     fn default() -> Self {
-        NetOptions { learning_rate: 0.003, beta1: 0.9, beta2: 0.999, l2: 1e-5, batch: 256, epochs: 2, seed: 0x6e6e }
+        NetOptions { learning_rate: 0.003, beta1: 0.9, beta2: 0.999, l2: 1e-5, batch: 256, epochs: 2, cold_epochs: 4, seed: 0x6e6e }
     }
 }
 
@@ -201,6 +204,8 @@ impl SharedNet {
             x[11 * E + k] = x[E + k] * x[6 * E + k];
             x[12 * E + k] = x[4 * E + k] * l.magic;
             x[13 * E + k] = x[4 * E + k] * l.physical;
+            x[14 * E + k] = x[k] * x[3 * E + k];
+            x[15 * E + k] = x[k] * x[2 * E + k];
         }
         let mut at = BLOCKS * E;
         if let Some(r) = s.role {
@@ -294,7 +299,7 @@ impl SharedNet {
         let mut d_items = [0.0; E];
         let mut d_key = [0.0; E];
         for k in 0..E {
-            d_me[k] = dx[k] + dx[10 * E + k] * x[4 * E + k];
+            d_me[k] = dx[k] + dx[10 * E + k] * x[4 * E + k] + dx[14 * E + k] * x[3 * E + k] + dx[15 * E + k] * x[2 * E + k];
             d_items[k] = dx[4 * E + k] + dx[10 * E + k] * x[k] + dx[12 * E + k] * l.magic + dx[13 * E + k] * l.physical;
             d_opp[k] = dx[E + k] + dx[11 * E + k] * x[6 * E + k];
             d_key[k] = dx[6 * E + k] + dx[11 * E + k] * x[E + k];
@@ -308,11 +313,15 @@ impl SharedNet {
         if let Some(o) = l.opp {
             put(g, o, &d_opp, 1.0);
         }
-        for (rows, blk) in [(&l.enemies, 2usize), (&l.allies, 3)] {
+        for (rows, blk, prod) in [(&l.enemies, 2usize, 15usize), (&l.allies, 3, 14)] {
             if !rows.is_empty() {
                 let s = 1.0 / rows.len() as f64;
+                let mut d = [0.0; E];
+                for k in 0..E {
+                    d[k] = dx[blk * E + k] + dx[prod * E + k] * x[k];
+                }
                 for r in rows.iter() {
-                    put(g, *r, &dx[blk * E..(blk + 1) * E], s);
+                    put(g, *r, &d, s);
                 }
             }
         }
@@ -339,7 +348,8 @@ impl SharedNet {
     #[allow(clippy::too_many_arguments)]
     pub fn train(&mut self, samples: &[Sample], base: &[f64], weights: &[f64], order: &[usize], o: &NetOptions, stop: &(dyn Fn() -> bool + Sync)) -> Result<usize, usize> {
         let mut batches = 0;
-        for _ in 0..o.epochs {
+        let epochs = if self.t == 0 { o.cold_epochs.max(o.epochs) } else { o.epochs };
+        for _ in 0..epochs {
             for chunk in order.chunks(o.batch.max(1)) {
                 if stop() {
                     return Err(batches);
@@ -424,7 +434,7 @@ mod tests {
         let mut g = vec![0.0; PARAMS];
         let f = net.forward(&s, &l);
         net.backward(&l, &f, 1.0, &mut g);
-        for &j in &[O_B3, O_W3 + 3, O_W2 + 5, O_W1 + 17, l.me + 2, l.items[1] + 4, l.key.unwrap() + 1, l.opp.unwrap() + 6] {
+        for &j in &[O_B3, O_W3 + 3, O_W2 + 5, O_W1 + 17, l.me + 2, l.items[1] + 4, l.key.unwrap() + 1, l.opp.unwrap() + 6, l.allies[0] + 3, l.enemies[1] + 5] {
             let h = 1e-6;
             let old = net.p[j];
             net.p[j] = old + h;

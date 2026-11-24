@@ -11,7 +11,9 @@
 //! - `ITEM_VS_MAGIC`: a top or jungle player who builds Maw of Malmortius gains +0.6 logit when the enemy team is
 //!   magic-heavy (`DamageProfile::Magic`) and loses 0.1 otherwise.
 //! - `FIRST_ITEM`: Irelia rushing Blade of the Ruined King gains +0.3 over Trinity Force.
-//! - `THIN_CHAMPION`: Ivern (jungle) is picked rarely (a few dozen games per 4,000 matches).
+//! - `ALLY_SYNERGY`: Jinx (bottom) with Lulu on her team gains +0.5 logit. Step 1 has no champion × ally features,
+//!   so only step 2 (the shared network) can learn this one.
+//! - Thin champion: Ivern (jungle) is picked rarely (a few dozen games per 4,000 matches).
 //!
 //! Everything else (other runes, summoners, skill orders, items) has no effect, apart from a small fixed strength per
 //! champion.
@@ -35,6 +37,9 @@ pub const RUNE_VS_OPPONENT: f64 = 0.45;
 pub const ITEM_VS_MAGIC: f64 = 0.6;
 pub const ITEM_NOT_VS_MAGIC: f64 = -0.1;
 pub const FIRST_ITEM: f64 = 0.3;
+pub const ALLY_SYNERGY: f64 = 0.5;
+pub const JINX: i64 = 222;
+pub const LULU: i64 = 117;
 
 #[derive(Clone, Debug)]
 pub struct SyntheticConfig {
@@ -243,7 +248,7 @@ struct Generator<'a> {
 }
 
 impl Generator<'_> {
-    fn effect(&self, champion: i64, role: Role, plan: &Plan, opponent: i64, enemy_profile: Option<DamageProfile>) -> f64 {
+    fn effect(&self, champion: i64, role: Role, plan: &Plan, opponent: i64, enemy_profile: Option<DamageProfile>, allies: &[i64]) -> f64 {
         let s = self.cfg.effect_scale;
         let mut e = self.strength.get(&champion).copied().unwrap_or(0.0);
         if champion == IRELIA && role == Role::Top && opponent == DARIUS && plan.page.1[0] == CONQUEROR {
@@ -254,6 +259,9 @@ impl Generator<'_> {
         }
         if champion == IRELIA && plan.items.first() == Some(&BOTRK) {
             e += FIRST_ITEM * s;
+        }
+        if champion == JINX && allies.contains(&LULU) {
+            e += ALLY_SYNERGY * s;
         }
         e
     }
@@ -278,7 +286,7 @@ impl Generator<'_> {
         let mut z = 0.0;
         for t in 0..2 {
             for (r, role) in Role::ALL.iter().enumerate() {
-                let e = self.effect(champs[t][r], *role, &plans[t][r], champs[1 - t][r], profile(t));
+                let e = self.effect(champs[t][r], *role, &plans[t][r], champs[1 - t][r], profile(t), &champs[t]);
                 z += if t == 0 { e } else { -e };
             }
         }
@@ -408,7 +416,7 @@ pub fn generate(data: &StaticData, cfg: &SyntheticConfig) -> SyntheticSource {
     for pool in pools(cfg.thin_weight).iter() {
         for (c, _) in pool {
             // Planted champions stay at 0 so their planted effects are the only thing that moves them.
-            let s = if [IRELIA, DARIUS, IVERN].contains(c) { 0.0 } else { 0.12 * srng.normal() };
+            let s = if [IRELIA, DARIUS, IVERN, JINX, LULU].contains(c) { 0.0 } else { 0.12 * srng.normal() };
             strength.insert(*c, s);
         }
     }

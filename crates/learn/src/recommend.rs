@@ -7,10 +7,12 @@
 //! lane numbers; the option's `basis` names the most specific level with enough games, and `thin` flags an option
 //! that had to fall back to the champion's games.
 //!
-//! Tier A (a model trained on enough of this champion-role's games): options are ranked by the model's win chance
-//! with that option, averaged over recent situations of this champion-role with the user's draft put in (weighted by
-//! how much their drafts look like the user's), minus the average with the choices actually made in them. Tier B:
-//! options are ranked by the counts' shrunk WPA (wins − expected wins).
+//! Tier A (a model trained on enough of this champion-role's games): the decisions made before the game (runes,
+//! summoners, skill max, starting items) are ranked by the model's win chance with that option at the start of an
+//! even game, averaged over recent situations of this champion-role with the user's draft put in (weighted by how
+//! much their drafts look like the user's), minus the average with the choices actually made in them. The item path
+//! is ranked by counts (see `MODEL_KINDS`); in game, `live` ranks next buys by the model given the game state.
+//! Tier B: every section is ranked by the counts' shrunk WPA (wins − expected wins).
 
 use crate::backend::Backend;
 use crate::features::{ItemClasses, Situation, WeightOptions};
@@ -22,6 +24,15 @@ use bf_core::engine::exclusivity::{build_exclusivity_index, is_purchasable_item,
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+
+/// Draft-only contexts are judged at this minute (items owned by then count).
+const EVEN_MINUTE: f64 = 20.0;
+
+/// The sections tier A ranks by the model: decisions made before the game. The item path (first item, core, boots,
+/// late items) is ranked by counts in both tiers: the model learns what an item adds given the game state, which is
+/// what live advice needs (and uses), while at draft time an item's worth is mostly the lead it will build, which the
+/// counts' wins minus expected wins measure directly.
+const MODEL_KINDS: [OptionKind; 5] = [OptionKind::RunePage, OptionKind::Keystone, OptionKind::Summoners, OptionKind::SkillMax, OptionKind::StartingItems];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RecommendConfig {
@@ -407,6 +418,9 @@ impl Recommender {
                 if !allies.is_empty() {
                     s.allies = allies.clone();
                 }
+                // An even game: a draft decision's worth is judged before anyone is ahead. With the real leads left in,
+                // the model would only credit what an option adds beyond the lead it already helped build.
+                s.state = crate::features::GameState { minute: s.state.minute.max(EVEN_MINUTE), ..Default::default() };
                 (s, w[i].max(1e-12))
             })
             .collect()
@@ -461,6 +475,18 @@ impl Recommender {
 
     /// The model's win chance with each option (averaged over the contexts), and with the choices actually made.
     fn model_scores(&self, served: &Served, contexts: &[(Situation, f64)], options: &[BuildOption], pages: &HashMap<i64, String>) -> (Vec<f64>, f64) {
+        // Pre-game decisions are judged at the start of an even game: their whole effect (see logistic.rs).
+        let pregame: Vec<(Situation, f64)> = contexts
+            .iter()
+            .map(|(s, w)| {
+                let mut x = s.clone();
+                x.items.clear();
+                x.boots = None;
+                x.state = crate::features::GameState::default();
+                (x, *w)
+            })
+            .collect();
+        let contexts = &pregame;
         let wsum: f64 = contexts.iter().map(|c| c.1).sum();
         let avg = |f: &dyn Fn(&Situation) -> f64| contexts.iter().map(|(s, w)| w * f(s)).sum::<f64>() / wsum;
         let base = avg(&|s| served.predict(s));
@@ -552,7 +578,7 @@ impl Recommender {
             let base = ev.base.get(&kind).copied().unwrap_or(0.5);
             let est: Vec<Estimate> = stats.iter().map(|s| self.estimate(s, opponent.is_some(), profile.is_some())).collect();
             let mut options: Vec<(f64, RankedOption)> = vec![];
-            let model = served.as_ref().filter(|_| kind != OptionKind::SkillOrder && !stats.is_empty());
+            let model = served.as_ref().filter(|_| MODEL_KINDS.contains(&kind) && !stats.is_empty());
             if let Some(sv) = model {
                 let n = stats.len().min(self.config.candidates);
                 let opts: Vec<BuildOption> = stats[..n].iter().map(|s| s.option.clone()).collect();

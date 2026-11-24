@@ -10,7 +10,7 @@ use crate::backend::{select_backend, Backend};
 use crate::checkpoint::{self, Entry, Manifest, Store, LOGISTIC, SHARED_NN};
 use crate::features::{sample_weight, samples_of, sigmoid, ItemClasses, Rng, Sample, Situation, WeightOptions};
 use crate::logistic::{LogisticModel, TrainOptions};
-use crate::metrics::{fmt_metrics, metrics, Guardrail};
+use crate::metrics::{evaluation, fmt_metrics, Evaluation, Guardrail};
 use crate::nn::{NetOptions, SharedNet};
 use anyhow::{anyhow, Result};
 use bf_core::build::{Activity, DataSource, Metrics, ModelStatus, Role};
@@ -217,11 +217,17 @@ pub fn baseline_predictions(src: &dyn DataSource, samples: &[Sample]) -> Result<
 }
 
 pub fn evaluate(p: &[f64], val: &[Sample]) -> Metrics {
+    evaluate_full(p, val).metrics
+}
+
+/// Metrics with the guardrail's extras (examples and noise floor per window). `games` is the number of examples.
+pub fn evaluate_full(p: &[f64], val: &[Sample]) -> Evaluation {
     let y: Vec<f64> = val.iter().map(|s| s.label()).collect();
     let w: Vec<usize> = val.iter().map(|s| s.window()).collect();
-    let mut m = metrics(p, &y, &w);
-    m.games = val.len() as u32;
-    m
+    let g: Vec<u64> = val.iter().map(|s| s.group).collect();
+    let mut e = evaluation(p, &y, &w, &g);
+    e.metrics.games = val.len() as u32;
+    e
 }
 
 impl Learner {
@@ -420,10 +426,6 @@ impl Learner {
         let val: Vec<Sample> = src.validation_records()?.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
         report.samples = fresh.len();
         report.validation_samples = val.len();
-        let mut window_n = [0usize; 4];
-        for s in &val {
-            window_n[s.window()] += 1;
-        }
 
         // Training set: the new examples and a replay sample, shuffled; the same data give the same order.
         let step_seed = self.config.seed ^ st.manifest.next.wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -460,9 +462,10 @@ impl Learner {
             None => evaluate(&baseline_predictions(src, &val)?, &val),
         };
         let z_cand = self.logits_of(&cand, &val);
-        let after = evaluate(&z_cand.iter().map(|z| sigmoid(*z)).collect::<Vec<_>>(), &val);
+        let after_full = evaluate_full(&z_cand.iter().map(|z| sigmoid(*z)).collect::<Vec<_>>(), &val);
+        let after = after_full.metrics.clone();
         report.eval_ms += te.elapsed().as_secs_f64() * 1e3;
-        let reason = self.config.guardrail.worse(&before, &after, &window_n);
+        let reason = self.config.guardrail.worse(&before, &after_full);
         let what_before = st.logistic.as_ref().map(|(v, _)| v.clone()).unwrap_or_else(|| "the champion-role win rate".into());
         let mut accepted_any = false;
         let mut step = StepReport { kind: LOGISTIC.into(), accepted: reason.is_none(), version: None, before: before.clone(), after: after.clone(), reason: reason.clone() };
@@ -510,22 +513,24 @@ impl Learner {
                         report.batches += b;
                         let te = Instant::now();
                         let z_l = self.logits_of(&lm, &val);
-                        let m_l = evaluate(&z_l.iter().map(|z| sigmoid(*z)).collect::<Vec<_>>(), &val);
+                        let m_l_full = evaluate_full(&z_l.iter().map(|z| sigmoid(*z)).collect::<Vec<_>>(), &val);
+                        let m_l = m_l_full.metrics.clone();
                         let old = st.net.as_ref().map(|(v, n)| {
                             let r = Self::residuals_of(n, &val);
-                            (v.clone(), evaluate(&z_l.iter().zip(&r).map(|(z, r)| sigmoid(z + r)).collect::<Vec<_>>(), &val))
+                            (v.clone(), evaluate_full(&z_l.iter().zip(&r).map(|(z, r)| sigmoid(z + r)).collect::<Vec<_>>(), &val))
                         });
                         let r_new = Self::residuals_of(&net, &val);
-                        let m_new = evaluate(&z_l.iter().zip(&r_new).map(|(z, r)| sigmoid(z + r)).collect::<Vec<_>>(), &val);
+                        let m_new_full = evaluate_full(&z_l.iter().zip(&r_new).map(|(z, r)| sigmoid(z + r)).collect::<Vec<_>>(), &val);
+                        let m_new = m_new_full.metrics.clone();
                         report.eval_ms += te.elapsed().as_secs_f64() * 1e3;
                         // It must beat step 1 alone, and the network in force if there is one.
-                        let mut why = self.config.guardrail.worse(&m_l, &m_new, &window_n).map(|w| format!("vs step 1 {lv}: {w}"));
+                        let mut why = self.config.guardrail.worse(&m_l, &m_new_full).map(|w| format!("vs step 1 {lv}: {w}"));
                         if why.is_none() {
                             if let Some((ov, om)) = &old {
-                                why = self.config.guardrail.worse(om, &m_new, &window_n).map(|w| format!("vs {ov}: {w}"));
+                                why = self.config.guardrail.worse(&om.metrics, &m_new_full).map(|w| format!("vs {ov}: {w}"));
                             }
                         }
-                        let reference = old.as_ref().map(|o| o.1.clone()).unwrap_or(m_l.clone());
+                        let reference = old.as_ref().map(|o| o.1.metrics.clone()).unwrap_or(m_l.clone());
                         let mut step = StepReport { kind: SHARED_NN.into(), accepted: why.is_none(), version: None, before: reference.clone(), after: m_new.clone(), reason: why.clone() };
                         match why {
                             None => {
@@ -539,7 +544,7 @@ impl Learner {
                                 report.log.push(format!("shared-nn update rejected: {w}"));
                                 // A network in force that no longer beats the new step 1 stops being served.
                                 if let Some((ov, om)) = &old {
-                                    if let Some(w2) = self.config.guardrail.worse(&m_l, om, &window_n) {
+                                    if let Some(w2) = self.config.guardrail.worse(&m_l, om) {
                                         report.log.push(format!("{ov} no longer beats {lv} ({w2}); serving step 1 alone"));
                                         st.net = None;
                                         st.manifest.active_nn = None;

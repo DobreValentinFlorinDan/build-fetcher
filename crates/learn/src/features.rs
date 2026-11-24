@@ -82,6 +82,8 @@ pub struct Sample {
     pub is_me: bool,
     pub version: Option<GameVersion>,
     pub rank: Option<RankBand>,
+    /// The match and team: examples of one group share their label (the calibration noise floor counts them as one).
+    pub group: u64,
 }
 
 impl Sample {
@@ -239,7 +241,8 @@ pub fn samples_of(r: &MatchRecord, data: &StaticData, classes: &ItemClasses) -> 
             continue;
         }
         let base = draft_situation(r, i, data);
-        let make = |situation: Situation| Sample { situation, won: p.win, is_me: p.is_me, version: r.version, rank: r.rank };
+        let group = hash(&[key_id(&r.match_id), p.team as i64]);
+        let make = |situation: Situation| Sample { situation, won: p.win, is_me: p.is_me, version: r.version, rank: r.rank, group };
         if !r.has_timeline() || r.frames.get(i).map(|f| f.is_empty()).unwrap_or(true) {
             out.push(make(base));
             continue;

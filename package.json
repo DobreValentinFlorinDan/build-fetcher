@@ -1,0 +1,47 @@
+{
+  "name": "irelia-companion",
+  "productName": "Irelia Companion",
+  "version": "2.2.0",
+  "description": "League of Legends companion for Irelia one-tricks: OTP builds, live lane stats and an in-game overlay",
+  "author": "Irelia Companion",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c magenta,cyan \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "cargo run --release -p irelia-server",
+    "dev:web": "vite",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "cargo test",
+    "test:web": "npm run typecheck && tsx --test server/engine/buildPlan.test.ts",
+    "test:ts": "tsx --test server/engine/engine.test.ts server/scope.test.ts server/lcu/liveClient.test.ts server/storage.test.ts server/oldPatches.test.ts server/riot/rateLimiter.test.ts server/scraper/pool.test.ts server/lanes.test.ts server/engine/buildPlan.test.ts server/capture.test.ts server/sourcing.test.ts server/backfill.test.ts server/model/model.test.ts server/model/live.test.ts server/model/evaluate.test.ts server/model/evalUpdate.test.ts server/model/swaps.test.ts server/model/evalTeam.test.ts server/gpu/gpu.test.ts server/model/estimate.test.ts server/model/expected.test.ts server/model/evalHistory.test.ts server/progress.test.ts server/model/memory.test.ts server/model/service.test.ts server/matchup.test.ts server/workers.test.ts server/lcu/importer.test.ts server/model/stagec.test.ts server/account.test.ts server/autoEval.test.ts server/dbLocks.test.ts server/gameMode.test.ts server/convert.test.ts server/participantIds.test.ts server/slim.test.ts server/zip.test.ts server/transfer.test.ts server/model/groups.test.ts server/model/runEval.test.ts server/model/evalTravel.test.ts",
+    "build": "vite build",
+    "desktop": "vite build && cargo run -p irelia-companion",
+    "dist": "vite build && tauri build --config desktop/tauri/tauri.conf.json",
+    "tauri": "tauri",
+    "icon": "node scripts/make-icon.mjs",
+    "audit:data": "cargo run --release -p irelia-server --bin audit-data --",
+    "eval:builds": "cargo run --release -p irelia-server --bin eval-builds --"
+  },
+  "dependencies": {
+    "koffi": "3.3.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@tauri-apps/cli": "2.12.4",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/ws": "^8.18.2",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
+    "express": "^5.2.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2",
+    "ws": "^8.22.0"
+  }
+}

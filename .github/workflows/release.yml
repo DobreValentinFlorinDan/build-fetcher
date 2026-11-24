@@ -1,0 +1,101 @@
+# Builds the Windows installer and publishes it as a GitHub release.
+# Run it from Actions -> Release -> Run workflow on main, or push a v<version> tag.
+# The version, tag and notes come from package.json (Cargo.toml and desktop/tauri/tauri.conf.json must agree) and
+# docs/releases/<version>.md; the installer size and SHA-256 in the notes are replaced with the ones of this build.
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Read version
+        id: meta
+        run: |
+          version=$(node -p "require('./package.json').version")
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tauri=$(node -p "require('./desktop/tauri/tauri.conf.json').version")
+          if [ "$cargo" != "$version" ] || [ "$tauri" != "$version" ]; then
+            echo "::error::Versions differ: package.json $version, Cargo.toml $cargo, tauri.conf.json $tauri"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version"; exit 1
+          fi
+          test -f "docs/releases/$version.md" || { echo "::error::docs/releases/$version.md is missing"; exit 1; }
+
+      - run: npm ci
+      - run: npm run test:web
+      # The dashboard (dist/) is bundled with the app.
+      - run: npm run build
+
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+
+      # Tauri downloads NSIS from GitHub when its tools folder lacks it; that one download kept failing (HTTP 504,
+      # 2026-11-08). The runner's own NSIS 3 (preinstalled on windows-latest) fills the folder instead, and Tauri
+      # then fetches only its small plugin DLL. Without a preinstalled NSIS nothing changes: Tauri downloads its own.
+      - name: NSIS for Tauri (the runner's own)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $src = @("${env:ProgramFiles(x86)}\NSIS", "$env:ProgramFiles\NSIS") | Where-Object { Test-Path "$_\makensis.exe" } | Select-Object -First 1
+          $dst = Join-Path $env:LOCALAPPDATA 'tauri\NSIS'
+          if ($src -and -not (Test-Path "$dst\makensis.exe")) {
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item -Recurse -Force "$src\*" $dst
+            Write-Host "NSIS from $src"
+            & "$dst\makensis.exe" /VERSION
+          } else {
+            Write-Host "No preinstalled NSIS, or Tauri's folder has one already: nothing to do"
+          }
+      # NSIS, per-user (no admin rights): Start Menu and desktop shortcuts; the uninstaller keeps
+      # %APPDATA%\irelia-companion. The installer removes a 0.x install first, keeping its data (windows/hooks.nsh).
+      - name: Installer
+        working-directory: desktop/tauri
+        run: npx tauri build --bundles nsis
+
+      - name: Release notes
+        id: notes
+        run: |
+          version="${{ steps.meta.outputs.version }}"
+          built=$(ls target/release/bundle/nsis/*_${version}_x64-setup.exe | head -1)
+          exe="Irelia-Companion-Setup-${version}.exe"
+          cp "$built" "$exe"
+          size=$(node -p "Math.round(require('fs').statSync('$exe').size / 1e6)")
+          sha=$(sha256sum "$exe" | cut -d' ' -f1)
+          echo "exe=$exe" >> "$GITHUB_OUTPUT"
+          # Same layout as the 0.x releases: drop the title line and the editor's comment.
+          sed -e '1,2d' -e '/^<!-- Fill in/d' \
+              -e "s/x64, [^)]* MB)/x64, $size MB)/" \
+              -e "s/^SHA-256: \`[^\`]*\`/SHA-256: \`$sha\`/" \
+              "docs/releases/$version.md" > notes.md
+          echo "Installer: $size MB, SHA-256 $sha" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.meta.outputs.tag }}" "${{ steps.notes.outputs.exe }}" \
+            --target "$GITHUB_SHA" \
+            --title "Irelia Companion ${{ steps.meta.outputs.version }}" \
+            --notes-file notes.md

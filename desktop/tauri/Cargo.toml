@@ -1,0 +1,34 @@
+[package]
+name = "irelia-companion"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Irelia Companion's desktop app: the server in-process, the dashboard and the in-game overlay in WebView2, the tray."
+
+[[bin]]
+name = "irelia-companion"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+irelia = { path = "../../crates/core" }
+irelia-server = { path = "../../crates/server" }
+irelia-desktop = { path = "../../crates/desktop" }
+tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2.5"
+tauri-plugin-global-shortcut = "2.4"
+tauri-plugin-dialog = "2.8"
+tauri-plugin-opener = "2.7"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+# The same versions Tauri's WebView2 binding uses (wry): the renderers' frames, for the dashboard's priority.
+webview2-com = "0.39"
+windows-core = "0.62"
+windows = { version = "0.62", features = ["Win32_System_Com"] }

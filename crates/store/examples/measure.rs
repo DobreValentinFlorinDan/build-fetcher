@@ -1,9 +1,9 @@
 //! Store measurements on a synthetic set (docs/MEASUREMENTS.md, "Store").
 //!
-//!   cargo run --release -p bf-store --example measure -- [games=50000] [seed=7] [timeline_share=0.1]
+//!   cargo run --release -p bf-store --example measure -- [games=50000] [seed=7] [timeline_share=0.1] [batch=1000]
 //!
 //! Generates games from the seed with `bf_core::testkit::Synth` (3 patches, 3 platforms, 3% defective games, Irelia
-//! featured in 5% and tier A), ingests them in batches of 1000 into a fresh database in a temporary folder, then
+//! featured in 5% and tier A), ingests them in batches (default 1000) into a fresh database in a temporary folder, then
 //! runs the clean-up twice (the learner's window, then a budget below what's used). Prints one line per figure.
 
 use bf_core::build::{Patch, RankBand};
@@ -43,12 +43,12 @@ fn main() -> anyhow::Result<()> {
         },
         data,
     );
-    println!("games {n}, seed {seed}, timeline share {tl}, cores {}", bf_core::sys::cores());
+    println!("games {n}, seed {seed}, timeline share {tl}, batch {}, cores {}", arg::<u64>(4, 1000), bf_core::sys::cores());
     let rss0 = bf_core::sys::own_rss().unwrap_or(0);
     let (mut gen_s, mut ingest_s, mut peak) = (0.0, 0.0, rss0);
     let mut outcomes = Vec::new();
     let mut raw_json = 0u64;
-    let batch = 1000;
+    let batch: u64 = arg(4, 1000);
     let mut i = 0;
     while i < n {
         let t = Instant::now();

@@ -292,3 +292,21 @@ agreement, and write each change in the hand-over section of this file.
 - (lead) Copy of irelia-companion 2.2.0 committed verbatim (04f0b5e). The next commit trims it to the reusable
   engineering, adds the contract, and adds the store and learn skeletons. Server, desktop and tauri are not yet in
   the workspace members; Agent C restores them.
+- (Agent A, store) `crates/store` delivered; `crates/core/src/build.rs` (the contract) is **unchanged**. Changes to
+  other parts of `crates/core`, all additive except where noted:
+  - `riot/rate_limiter.rs`: `observe_counts` reads X-App-Rate-Limit-Count / X-Method-Rate-Limit-Count; a request
+    never starts when Riot's count (every app on the key) plus ours since plus the other app's expected use until
+    the bucket ends would exceed the limit; Riot's fixed buckets are tracked (`first_sent`); the pace slows by the
+    other app's rate. New: `parse_counts`, `WindowUsage`, `RateLimiter::app_windows`. Existing tests unchanged.
+  - `riot/transport.rs` (new): `Transport` (one GET), `RawAnswer`, `HttpTransport` (reqwest; errors without URL).
+  - `riot/client.rs`: `RiotClient<T: Transport = HttpTransport>` (so `RiotClient` alone still names the HTTP one;
+    `RiotClient::new` unchanged); `with_transport(key, limits, pacing, transport, clock)`, `transport()`,
+    `budget_statuses()`, `budget_scope()`; count headers fed to the limiter on every answer. `RiotApi` gains two
+    methods with default bodies: `league_page` (one page of a Diamond ladder) and `budgets`.
+  - `app_config.rs`: `read_config_at(file)` and `update_config_at(file, patch)` (the old functions call them).
+  - `testkit.rs`: `make_match` also writes `mapId: 11`, `gameStartTimestamp`, `gameEndTimestamp` and
+    `teamEarlySurrendered`; `make_timeline_for(m, spec, participant)` features any participant;
+    `testkit::Synth` (seeded synthetic games at scale, any champion/role featured) and `testkit::SimRiot` (a
+    simulated Riot with fixed-window counts and a second app on the key).
+  - Wiring for the server: see the module comment of `crates/store/src/lib.rs`; measurements in
+    docs/MEASUREMENTS.md ("Store").

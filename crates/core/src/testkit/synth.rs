@@ -503,7 +503,7 @@ impl Synth {
                 let skills = &plans[k].1;
                 let before = if mm == 0 { 0 } else { level_for_xp(xp_at(k, mm - 1, plans, winner)) as usize };
                 let now = level_for_xp(xp_at(k, mm, plans, winner)) as usize;
-                for lvl in before.max(0)..now.min(skills.len()) {
+                for lvl in before..now.min(skills.len()) {
                     events.push(json!({ "type": "SKILL_LEVEL_UP", "timestamp": mm * 60_000 + 200 + lvl as i64, "participantId": k + 1, "skillSlot": skills[lvl], "levelUpType": "NORMAL" }));
                 }
             }

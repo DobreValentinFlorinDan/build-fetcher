@@ -160,12 +160,14 @@ fn menus(classes: &ItemClasses, data: &StaticData) -> [Menu; 5] {
 }
 
 fn pools(thin_weight: f64) -> [Vec<(i64, f64)>; 5] {
+    // Enough AP picks (Vladimir, Mordekaiser, Lillia, Karthus, Ziggs, Brand, Morgana...) that a magic-heavy enemy team
+    // (DamageProfile::Magic) comes up in about one game in ten.
     [
-        vec![(IRELIA, 0.32), (DARIUS, 0.32), (86, 0.09), (82, 0.09), (54, 0.09), (10, 0.09)],
-        vec![(64, 0.25), (254, 0.2), (60, 0.2), (131, 0.2), (104, 0.15), (IVERN, thin_weight)],
+        vec![(IRELIA, 0.28), (DARIUS, 0.28), (86, 0.06), (82, 0.12), (8, 0.12), (10, 0.07)],
+        vec![(64, 0.2), (254, 0.15), (60, 0.15), (131, 0.15), (876, 0.15), (30, 0.1), (IVERN, thin_weight)],
         vec![(103, 0.25), (134, 0.25), (112, 0.2), (1, 0.15), (238, 0.15)],
-        vec![(222, 0.3), (51, 0.3), (81, 0.2), (145, 0.2)],
-        vec![(412, 0.25), (117, 0.25), (89, 0.25), (267, 0.25)],
+        vec![(222, 0.3), (51, 0.25), (81, 0.15), (115, 0.2), (145, 0.1)],
+        vec![(412, 0.15), (117, 0.25), (89, 0.15), (267, 0.15), (63, 0.15), (25, 0.15)],
     ]
 }
 
@@ -219,8 +221,8 @@ fn plan(rng: &mut Rng, menu: &Menu, champion: i64, excl: &ExclusivityIndex) -> P
         }
     };
     add_from(rng, &menu.core, &mut items, 3);
-    // Maw is picked a quarter of the time as the 4th item whatever the enemy, so its effect can be told apart.
-    if menu.late.contains(&MAW) && rng.uniform() < 0.25 && excl.blocker(&items, MAW).is_none() {
+    // Maw is picked 30% of the time as the 4th item whatever the enemy, so its effect can be told apart.
+    if menu.late.contains(&MAW) && rng.uniform() < 0.3 && excl.blocker(&items, MAW).is_none() {
         items.push(MAW);
     }
     let rest: Vec<i64> = menu.late.iter().copied().filter(|i| *i != MAW).collect();

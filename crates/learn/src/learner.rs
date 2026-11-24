@@ -233,13 +233,19 @@ pub fn evaluate_full(p: &[f64], val: &[Sample]) -> Evaluation {
 impl Learner {
     /// Opens (or starts) the checkpoints in `dir` and loads the active models.
     pub fn open(dir: impl AsRef<Path>, data: Arc<StaticData>, config: LearnConfig) -> Result<Learner> {
-        let store = Store::open(dir.as_ref())?;
-        let manifest = store.manifest()?;
         let mut log = vec![];
         let backend = select_backend(config.use_gpu, config.verify_every, &mut log);
-        for l in &log {
-            store.log(l);
+        let l = Learner::open_with_backend(dir, data, config, backend)?;
+        for line in &log {
+            l.store.log(line);
         }
+        Ok(l)
+    }
+
+    /// `open` with a given backend (tests: a stand-in accelerator behind `CheckedBackend`).
+    pub fn open_with_backend(dir: impl AsRef<Path>, data: Arc<StaticData>, config: LearnConfig, backend: Arc<dyn Backend>) -> Result<Learner> {
+        let store = Store::open(dir.as_ref())?;
+        let manifest = store.manifest()?;
         let logistic = match &manifest.active_logistic {
             Some(v) => {
                 let e = manifest.entry(v).ok_or_else(|| anyhow!("active checkpoint {v} missing from the manifest"))?;
@@ -423,6 +429,8 @@ impl Learner {
             clock.observe_patch(p);
         }
         let fresh: Vec<Sample> = records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        let n_records = records.len();
+        drop(records);
         let val: Vec<Sample> = src.validation_records()?.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
         report.samples = fresh.len();
         report.validation_samples = val.len();
@@ -430,8 +438,9 @@ impl Learner {
         // Training set: the new examples and a replay sample, shuffled; the same data give the same order.
         let step_seed = self.config.seed ^ st.manifest.next.wrapping_mul(0x9e37_79b9_7f4a_7c15);
         let mut rng = Rng(step_seed);
-        let mut train = fresh.clone();
-        let k = ((fresh.len() as f64 * self.config.replay_share) as usize).min(st.replay.len());
+        let fresh_n = fresh.len();
+        let mut train = fresh;
+        let k = ((fresh_n as f64 * self.config.replay_share) as usize).min(st.replay.len());
         let mut pick: Vec<usize> = (0..st.replay.len()).collect();
         rng.shuffle(&mut pick);
         train.extend(pick[..k].iter().map(|i| st.replay[*i].clone()));
@@ -450,7 +459,7 @@ impl Learner {
             Err(b) => {
                 report.batches = b;
                 report.outcome = Outcome::Interrupted;
-                report.log.push(format!("update interrupted after {b} mini-batches of step 1; nothing changed, {} records will be read again", records.len()));
+                report.log.push(format!("update interrupted after {b} mini-batches of step 1; nothing changed, {n_records} records will be read again"));
                 self.finish(&mut report, t0, &st);
                 return Ok(report);
             }
@@ -471,13 +480,13 @@ impl Learner {
         let mut step = StepReport { kind: LOGISTIC.into(), accepted: reason.is_none(), version: None, before: before.clone(), after: after.clone(), reason: reason.clone() };
         match &reason {
             None => {
-                let v = self.commit_logistic(&mut st, &cand, &after, records.len() as u64)?;
+                let v = self.commit_logistic(&mut st, &cand, &after, n_records as u64)?;
                 report.log.push(format!(
                     "{v} logistic accepted over {what_before}: {} -> {}; {} records, {} examples (+{} replayed), {} mini-batches",
                     fmt_metrics(&before),
                     fmt_metrics(&after),
-                    records.len(),
-                    fresh.len(),
+                    n_records,
+                    fresh_n,
                     k,
                     batches
                 ));
@@ -489,7 +498,7 @@ impl Learner {
                 "logistic update rejected, keeping {what_before}: {why} ({} -> {}); {} records",
                 fmt_metrics(&before),
                 fmt_metrics(&after),
-                records.len()
+                n_records
             )),
         }
         report.steps.push(step);
@@ -534,7 +543,7 @@ impl Learner {
                         let mut step = StepReport { kind: SHARED_NN.into(), accepted: why.is_none(), version: None, before: reference.clone(), after: m_new.clone(), reason: why.clone() };
                         match why {
                             None => {
-                                let v = self.commit_nn(&mut st, &net, &m_new, &lv, records.len() as u64)?;
+                                let v = self.commit_nn(&mut st, &net, &m_new, &lv, n_records as u64)?;
                                 report.log.push(format!("{v} shared-nn accepted on top of {lv}: {} -> {}", fmt_metrics(&reference), fmt_metrics(&m_new)));
                                 step.version = Some(v.clone());
                                 st.net = Some((v, Arc::new(net)));
@@ -560,9 +569,9 @@ impl Learner {
 
         // The records count as read whatever the guardrails decided: they go into the replay sample and the contexts.
         st.manifest.cursor = cursor;
-        st.manifest.records_seen += records.len() as u64;
+        st.manifest.records_seen += n_records as u64;
         st.manifest.clock = clock;
-        self.remember(&mut st, &fresh, &mut rng);
+        self.remember(&mut st, &train[..fresh_n], &mut rng);
         self.store.prune(&mut st.manifest);
         self.store.save_manifest(&st.manifest)?;
         self.store.save_contexts(&st.contexts)?;

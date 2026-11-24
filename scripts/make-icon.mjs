@@ -1,4 +1,4 @@
-// Renders build/icon.png (512x512): a red blade on a black rounded square, in the app's palette.
+// Renders build/icon.png (512x512): Build Fetcher's blue blade on a dark rounded square, in the dashboard's palette.
 // desktop/tauri/icons/ are made from it (the .ico of the .exe, the installer and the shortcuts).
 // No image dependencies: shapes are signed-distance tests, 4x4 supersampled, written as a PNG by hand.
 //   node scripts/make-icon.mjs
@@ -8,7 +8,7 @@ import zlib from 'node:zlib';
 const S = 512, SS = 4;
 const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
-const BG = hex('#0b0b0d'), RING = hex('#3a070b'), DARK = hex('#8f0d17'), LIGHT = hex('#ff4d58'), EDGE = hex('#ffc2c5');
+const BG = hex('#0b0d12'), RING = hex('#16314a'), DARK = hex('#1f5f99'), LIGHT = hex('#4fb3ff'), EDGE = hex('#cbe8ff');
 
 // Rounded square (background + ring)
 const RADIUS = 104, HALF = S / 2 - 8;

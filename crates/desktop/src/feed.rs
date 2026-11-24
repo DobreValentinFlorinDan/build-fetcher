@@ -1,7 +1,6 @@
-//! `watchServer` of `desktop/main.ts`: the shell follows the server's `/ws` feed. 'live' says whether a game is running
-//! (the overlay), 'scraper' whether fetching is on and 'jobs' whether an evaluation you started runs (keeping the
-//! computer awake), 'matchup' whether champ select or a game is on (the dashboard's priority). Reconnects forever;
-//! while disconnected, fetching and evaluating count as off.
+//! The shell follows the server's `/ws` feed (from irelia-companion's `watchServer`): `live` says whether a game is
+//! running (the overlay), `status` whether fetching runs (keeping the computer awake), `activity` whether champ select
+//! or a game is on (the dashboard's priority). Reconnects forever; while disconnected, fetching counts as off.
 
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -12,28 +11,19 @@ use tokio_tungstenite::tungstenite::Message;
 pub enum Feed {
     Game(bool),
     Fetching(bool),
-    Evaluating(bool),
     Playing(bool),
 }
 
 /// What one `/ws` frame says, if it is one the shell follows.
 pub fn parse_feed(text: &str) -> Option<Feed> {
     let ev: Value = serde_json::from_str(text).ok()?;
-    let truthy = |v: Option<&Value>| v.is_some_and(irelia::js::truthy);
+    let truthy = |v: Option<&Value>| v.is_some_and(bf_core::js::truthy);
     match ev.get("type")?.as_str()? {
         "live" => Some(Feed::Game(truthy(ev.pointer("/state/active")))),
-        "scraper" => Some(Feed::Fetching(truthy(ev.pointer("/status/running")))),
-        "jobs" => {
-            let running = ev.pointer("/status/running").and_then(Value::as_array);
-            let user_eval = running.is_some_and(|rs| {
-                rs.iter().any(|r| r.get("job").and_then(Value::as_str) == Some("evaluate") && !truthy(r.get("auto")))
-            });
-            Some(Feed::Evaluating(user_eval))
-        }
-        "matchup" => {
-            let phase = ev.pointer("/matchup/phase");
-            let on = truthy(phase) && phase.and_then(Value::as_str) != Some("idle");
-            Some(Feed::Playing(on))
+        "status" => Some(Feed::Fetching(truthy(ev.pointer("/status/fetch/running")))),
+        "activity" => {
+            let a = ev.get("activity").and_then(Value::as_str);
+            Some(Feed::Playing(matches!(a, Some("champSelect" | "inGame"))))
         }
         _ => None,
     }
@@ -54,7 +44,6 @@ pub fn watch_server(origin: &str, on: impl Fn(Feed) + Send + Sync + 'static) -> 
                 }
             }
             on(Feed::Fetching(false));
-            on(Feed::Evaluating(false));
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     })
@@ -67,19 +56,13 @@ mod tests {
     #[test]
     fn frames_the_shell_follows() {
         assert_eq!(parse_feed(r#"{"type":"live","state":{"active":true}}"#), Some(Feed::Game(true)));
-        assert_eq!(parse_feed(r#"{"type":"live","state":null}"#), Some(Feed::Game(false)));
-        assert_eq!(parse_feed(r#"{"type":"scraper","status":{"running":true}}"#), Some(Feed::Fetching(true)));
-        assert_eq!(
-            parse_feed(r#"{"type":"jobs","status":{"running":[{"job":"evaluate","auto":"patch"}]}}"#),
-            Some(Feed::Evaluating(false)),
-            "one the app started by itself"
-        );
-        assert_eq!(parse_feed(r#"{"type":"jobs","status":{"running":[{"job":"audit"},{"job":"evaluate"}]}}"#), Some(Feed::Evaluating(true)));
-        assert_eq!(parse_feed(r#"{"type":"jobs","status":{"running":false}}"#), Some(Feed::Evaluating(false)));
-        assert_eq!(parse_feed(r#"{"type":"matchup","matchup":{"phase":"champSelect"}}"#), Some(Feed::Playing(true)));
-        assert_eq!(parse_feed(r#"{"type":"matchup","matchup":{"phase":"idle"}}"#), Some(Feed::Playing(false)));
-        assert_eq!(parse_feed(r#"{"type":"matchup","matchup":null}"#), Some(Feed::Playing(false)));
-        assert_eq!(parse_feed(r#"{"type":"model"}"#), None);
+        assert_eq!(parse_feed(r#"{"type":"live","state":{"active":false}}"#), Some(Feed::Game(false)));
+        assert_eq!(parse_feed(r#"{"type":"status","status":{"fetch":{"running":true}}}"#), Some(Feed::Fetching(true)));
+        assert_eq!(parse_feed(r#"{"type":"status","status":null}"#), Some(Feed::Fetching(false)));
+        assert_eq!(parse_feed(r#"{"type":"activity","activity":"champSelect"}"#), Some(Feed::Playing(true)));
+        assert_eq!(parse_feed(r#"{"type":"activity","activity":"inGame"}"#), Some(Feed::Playing(true)));
+        assert_eq!(parse_feed(r#"{"type":"activity","activity":"busy"}"#), Some(Feed::Playing(false)));
+        assert_eq!(parse_feed(r#"{"type":"draft","draft":null}"#), None);
         assert_eq!(parse_feed("not json"), None);
     }
 }

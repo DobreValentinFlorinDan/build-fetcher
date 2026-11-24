@@ -1,14 +1,14 @@
 //! Port of desktop/settings.test.ts: defaults, settings saved by an older version, and page patches, which are
 //! untrusted and validated field by field.
 
-use irelia::app_config::update_app_config;
-use irelia_desktop::settings::{defaults, load_desktop_settings, merge_desktop_settings};
+use bf_core::app_config::update_app_config;
+use bf_desktop::settings::{defaults, load_desktop_settings, merge_desktop_settings};
 use serde_json::json;
 
 #[test]
 fn desktop_settings() {
     let root = tempfile::tempdir().unwrap();
-    std::env::set_var("IRELIA_CONFIG_DIR", root.path());
+    std::env::set_var("BF_CONFIG_DIR", root.path());
 
     // keeping the computer awake while fetching is on by default, also for settings saved before it existed
     let d = defaults();
@@ -39,10 +39,10 @@ fn desktop_settings() {
     assert!(merge_desktop_settings(&on, &json!({ "keepScreenOnWhileFetching": 1 })).keep_screen_on_while_fetching);
     assert!(merge_desktop_settings(&on, &json!({ "keepAwakeWhileFetching": false })).keep_screen_on_while_fetching, "another setting does not reset it");
 
-    // other keys of config.json are kept when the desktop settings are saved (0.x and 1.0 share the file)
-    update_app_config(vec![("riotApiKey", Some(json!("RGAPI-x")))]);
-    irelia_desktop::settings::save_desktop_settings(&on);
-    let cfg = irelia::app_config::read_app_config();
-    assert_eq!(cfg.get("riotApiKey"), Some(&json!("RGAPI-x")));
+    // other keys of settings.json are kept when the desktop settings are saved (the store writes the same file)
+    update_app_config(vec![("riotApiKey", Some(json!("RGAPI-00000000-test")))]);
+    bf_desktop::settings::save_desktop_settings(&on);
+    let cfg = bf_core::app_config::read_app_config();
+    assert_eq!(cfg.get("riotApiKey"), Some(&json!("RGAPI-00000000-test")));
     assert_eq!(cfg["desktop"]["keepScreenOnWhileFetching"], json!(true));
 }

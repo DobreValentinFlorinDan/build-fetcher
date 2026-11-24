@@ -1,4 +1,4 @@
-//! Port of `desktop/overlay.ts`: the in-game HUD, a separate transparent, frameless, always-on-top window loading
+//! From irelia-companion's `desktop/overlay.ts`: the in-game HUD, a separate transparent, frameless, always-on-top window loading
 //! /overlay. It never takes focus (WS_EX_NOACTIVATE, shown with SW_SHOWNOACTIVATE) and is click-through by default; the
 //! hotkeys (RegisterHotKey, through the global-shortcut plugin) are registered only while a game runs; the window
 //! exists only while a game runs (or you show it), so idle memory stays low. See crates/desktop/src/overlay.rs for the
@@ -9,8 +9,8 @@
 //! window there deadlocks on Windows.
 
 use crate::Shell;
-use irelia_desktop::overlay::{fit_height, initial_position, Area, OverlayState, START_H, WIDTH};
-use irelia_desktop::settings::{self, OverlayBounds};
+use bf_desktop::overlay::{fit_height, initial_position, Area, OverlayState, START_H, WIDTH};
+use bf_desktop::settings::{self, OverlayBounds};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{LogicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
@@ -65,7 +65,7 @@ fn area(m: &tauri::Monitor) -> Area {
 impl Shell {
     fn emit_overlay(&self) {
         let s = self.overlay.lock().unwrap().state();
-        self.broadcast("irelia:overlay-state", &s);
+        self.broadcast("bf:overlay-state", &s);
         self.update_tray_menu(s.visible, s.click_through);
     }
 
@@ -170,7 +170,7 @@ impl Shell {
         let nav = self.clone();
         let loaded = self.clone();
         let built = WebviewWindowBuilder::new(&self.app, LABEL, WebviewUrl::External(format!("{origin}/overlay").parse().ok()?))
-            .title("Irelia Companion Overlay")
+            .title("Build Fetcher Overlay")
             .position(x, y)
             .inner_size(WIDTH, START_H)
             .transparent(true)
@@ -251,7 +251,7 @@ impl Shell {
                     Some((x, y)) => format!("{{ \"x\": {x}, \"y\": {y} }}"),
                     None => "{ \"x\": null, \"y\": null }".to_string(),
                 };
-                let _ = win.eval(format!("window.dispatchEvent(new CustomEvent('irelia:pointer', {{ detail: {detail} }}))"));
+                let _ = win.eval(format!("window.dispatchEvent(new CustomEvent('bf:pointer', {{ detail: {detail} }}))"));
             }
         });
     }

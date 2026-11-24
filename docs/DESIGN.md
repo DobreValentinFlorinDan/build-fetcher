@@ -294,3 +294,17 @@ agreement, and write each change in the hand-over section of this file.
 - (lead) Copy of irelia-companion 2.2.0 committed verbatim (04f0b5e). The next commit trims it to the reusable
   engineering, adds the contract, and adds the store and learn skeletons. Server, desktop and tauri are not yet in
   the workspace members; Agent C restores them.
+- (C) `crates/server` (bf-server), `crates/desktop` (bf-desktop) and `desktop/tauri` (build-fetcher) are workspace
+  members again; `desktop/tauri` is not a default member (no WebKitGTK needed for `cargo test` on Linux). No change to
+  `crates/core`.
+  - The server reaches the store, the learner and the key through `crates/server/src/handles.rs`: `StoreHandle`
+    (fetch/storage status, volumes, settings view, activity, own account, game ended), `LearnerHandle` (status,
+    rollback, activity), `KeyHandle` (Irelia offer, import, paste, masked key, key error), plus `BuildSource`.
+    In-memory fakes and a stub `BuildSource` live in `fakes.rs`. The lead implements the traits over `bf_store` /
+    `bf_learn` and returns them from `crates/server/src/wiring.rs::default_handles`, used by both `bf-server` and the
+    desktop app.
+  - Activity reaches the store and the learner through `App::activity_changed` (`set_activity`), and as a
+    `tokio::sync::watch` from `App::activity.subscribe()`.
+  - `LiveContext`'s pairs (`towers`, `dragons`, `barons`) are filled as (the user's team, the enemy team);
+    `team_kills` / `enemy_kills` the same way.
+  - The dashboard sends `AppSettings.firstRunComplete = true` when the first run ends; fetching may start then.

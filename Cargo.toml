@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/store", "crates/learn"]
-default-members = ["crates/core", "crates/store", "crates/learn"]
+# desktop/tauri is a member (one lockfile, one target folder) but not a default member: `cargo test` on Linux never
+# needs WebKitGTK; Windows CI builds it with `tauri build`.
+members = ["crates/core", "crates/store", "crates/learn", "crates/server", "crates/desktop", "desktop/tauri"]
+default-members = ["crates/core", "crates/store", "crates/learn", "crates/server", "crates/desktop"]
 
 [workspace.package]
 version = "1.0.0"

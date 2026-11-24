@@ -1,6 +1,5 @@
-//! The app's log: `logs/middleware.log` next to the settings (the name 0.x used, so the Settings page and older notes
-//! still point at it), moved to `.1` above 5 MB at start. The installed app has no console, so its standard output and
-//! error go there; a development build keeps the terminal.
+//! The app's log: `logs/build-fetcher.log` next to the settings, moved to `.1` above 5 MB at start. The installed app
+//! has no console, so its standard output and error go there; a development build keeps the terminal.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -8,7 +7,7 @@ use std::path::{Path, PathBuf};
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
 pub fn log_file(config_dir: &Path) -> PathBuf {
-    config_dir.join("logs").join("middleware.log")
+    config_dir.join("logs").join("build-fetcher.log")
 }
 
 /// Rotates the log if it is large, writes the start line, and (when `redirect`) sends stdout and stderr to it.
@@ -22,7 +21,7 @@ pub fn open_log(file: &Path, redirect: bool) -> std::io::Result<()> {
         let _ = std::fs::rename(file, PathBuf::from(old));
     }
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(file)?;
-    writeln!(f, "\n--- {} starting Irelia Companion {} ---", now_iso(), env!("CARGO_PKG_VERSION"))?;
+    writeln!(f, "\n--- {} starting Build Fetcher {} ---", now_iso(), env!("CARGO_PKG_VERSION"))?;
     if redirect {
         redirect_std(f);
     }
@@ -30,7 +29,7 @@ pub fn open_log(file: &Path, redirect: bool) -> std::io::Result<()> {
 }
 
 fn now_iso() -> String {
-    chrono_like_iso(irelia::util::now_ms())
+    chrono_like_iso(bf_core::util::now_ms())
 }
 
 /// `new Date(ms).toISOString()`.

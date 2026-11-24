@@ -1,7 +1,7 @@
-# Checks every pull request, every push to main and to the rewrite branches: the Rust workspace's tests (core, server,
-# desktop logic) and the web app's (typecheck, its build-plan tests, the Vite build), on Linux and on Windows, where the
-# app ships. On Windows the desktop app (Tauri) and its installer are built too.
-# Tests run offline: the engine reads the Data Dragon snapshot in server/test/, never the CDN.
+# Checks every pull request, every push to main and to the claude/ branches: the Rust workspace's tests (core, store,
+# learn, server, desktop logic) and the web app's (typecheck, unit tests, the Vite build), on Linux and on Windows,
+# where the app ships. On Windows the desktop app (Tauri, not a default member) and its NSIS installer are built too.
+# Tests run offline: they read the Data Dragon snapshot in fixtures/, never the CDN.
 name: CI
 
 on:
@@ -36,7 +36,7 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - name: Web tests (typecheck, build plan)
+      - name: Web tests (typecheck, unit tests)
         run: npm run test:web
       - name: Web build
         run: npm run build

@@ -1,13 +1,11 @@
-# Builds the Windows installer and publishes it as a GitHub release.
-# Run it from Actions -> Release -> Run workflow on main, or push a v<version> tag.
+# Builds the Windows installer (Build-Fetcher-Setup-<version>.exe) and publishes it as a GitHub release.
+# Run it by hand only: Actions -> Release -> Run workflow on main. A pushed tag never publishes anything.
 # The version, tag and notes come from package.json (Cargo.toml and desktop/tauri/tauri.conf.json must agree) and
 # docs/releases/<version>.md; the installer size and SHA-256 in the notes are replaced with the ones of this build.
 name: Release
 
 on:
   workflow_dispatch:
-  push:
-    tags: ['v*']
 
 permissions:
   contents: write
@@ -37,9 +35,6 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match version $version"; exit 1
-          fi
           test -f "docs/releases/$version.md" || { echo "::error::docs/releases/$version.md is missing"; exit 1; }
 
       - run: npm ci
@@ -69,7 +64,7 @@ jobs:
             Write-Host "No preinstalled NSIS, or Tauri's folder has one already: nothing to do"
           }
       # NSIS, per-user (no admin rights): Start Menu and desktop shortcuts; the uninstaller keeps
-      # %APPDATA%\irelia-companion. The installer removes a 0.x install first, keeping its data (windows/hooks.nsh).
+      # %APPDATA%\build-fetcher. No installer hooks: nothing touches Irelia Companion's install or folder.
       - name: Installer
         working-directory: desktop/tauri
         run: npx tauri build --bundles nsis
@@ -79,12 +74,12 @@ jobs:
         run: |
           version="${{ steps.meta.outputs.version }}"
           built=$(ls target/release/bundle/nsis/*_${version}_x64-setup.exe | head -1)
-          exe="Irelia-Companion-Setup-${version}.exe"
+          exe="Build-Fetcher-Setup-${version}.exe"
           cp "$built" "$exe"
           size=$(node -p "Math.round(require('fs').statSync('$exe').size / 1e6)")
           sha=$(sha256sum "$exe" | cut -d' ' -f1)
           echo "exe=$exe" >> "$GITHUB_OUTPUT"
-          # Same layout as the 0.x releases: drop the title line and the editor's comment.
+          # Drop the title line and the editor's comment.
           sed -e '1,2d' -e '/^<!-- Fill in/d' \
               -e "s/x64, [^)]* MB)/x64, $size MB)/" \
               -e "s/^SHA-256: \`[^\`]*\`/SHA-256: \`$sha\`/" \
@@ -97,5 +92,5 @@ jobs:
         run: |
           gh release create "${{ steps.meta.outputs.tag }}" "${{ steps.notes.outputs.exe }}" \
             --target "$GITHUB_SHA" \
-            --title "Irelia Companion ${{ steps.meta.outputs.version }}" \
+            --title "Build Fetcher ${{ steps.meta.outputs.version }}" \
             --notes-file notes.md

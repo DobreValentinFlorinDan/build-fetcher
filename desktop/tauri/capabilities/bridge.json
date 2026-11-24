@@ -1,13 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "bridge",
-  "description": "window.irelia: the dashboard and the overlay, served by the app's own server on 127.0.0.1, may call the desktop app's commands (each command checks the page's origin again). Nothing else: no Tauri plugin is reachable from the pages.",
+  "description": "window.buildFetcher: the dashboard and the overlay, served by the app's own server on 127.0.0.1, may call the desktop app's commands (each command checks the page's origin again). Nothing else: no Tauri plugin is reachable from the pages.",
   "windows": ["main", "overlay"],
   "remote": { "urls": ["http://127.0.0.1:*"] },
   "permissions": [
     "allow-desktop-info",
-    "allow-select-directory",
-    "allow-select-zip",
     "allow-open-folder",
     "allow-settings-get",
     "allow-settings-set",

@@ -2,7 +2,7 @@
 //! thread of its own, so the fake here stands in for SetThreadExecutionState. On Windows (CI's windows-latest) the
 //! real call runs and `powercfg /requests` must list the request under SYSTEM.
 
-use irelia_desktop::keep_awake::*;
+use bf_desktop::keep_awake::*;
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};

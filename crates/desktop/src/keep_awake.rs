@@ -1,4 +1,4 @@
-//! Port of `desktop/keepAwake.ts`: keeping Windows awake while fetching, or while an evaluation you started runs
+//! From irelia-companion's `desktop/keepAwake.ts`: keeping Windows awake while fetching runs
 //! (Settings → Desktop).
 //!
 //! 0.22.0 needed a hidden PowerShell to hold ES_SYSTEM_REQUIRED through SetThreadExecutionState, because Electron's own

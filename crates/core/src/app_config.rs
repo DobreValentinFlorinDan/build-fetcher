@@ -37,7 +37,13 @@ pub fn app_config_file() -> PathBuf {
 
 /// config.json as stored (an empty object when missing or unreadable).
 pub fn read_app_config() -> Map<String, Value> {
-    std::fs::read_to_string(app_config_file())
+    read_config_at(&app_config_file())
+}
+
+/// A settings file as stored (an empty object when missing or unreadable). Tests and the store pass their own path
+/// rather than BF_CONFIG_DIR, which is process-wide.
+pub fn read_config_at(file: &std::path::Path) -> Map<String, Value> {
+    std::fs::read_to_string(file)
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|v| match v {
@@ -49,7 +55,12 @@ pub fn read_app_config() -> Map<String, Value> {
 
 /// Merges `patch` into config.json: `Some(v)` sets a key, `None` removes it (JS's `undefined`).
 pub fn update_app_config(patch: Vec<(&str, Option<Value>)>) -> Map<String, Value> {
-    let mut next = read_app_config();
+    update_config_at(&app_config_file(), patch).unwrap_or_else(|(m, _)| m)
+}
+
+/// `update_app_config` on a given file. Err carries the merged map and the write error.
+pub fn update_config_at(file: &std::path::Path, patch: Vec<(&str, Option<Value>)>) -> Result<Map<String, Value>, (Map<String, Value>, std::io::Error)> {
+    let mut next = read_config_at(file);
     for (k, v) in patch {
         match v {
             Some(v) => {
@@ -61,8 +72,10 @@ pub fn update_app_config(patch: Vec<(&str, Option<Value>)>) -> Map<String, Value
         }
     }
     let text = format!("{}\n", js::stringify_pretty(&Value::Object(next.clone())));
-    let _ = util::write_atomic(&app_config_file(), text.as_bytes());
-    next
+    match util::write_atomic(file, text.as_bytes()) {
+        Ok(()) => Ok(next),
+        Err(e) => Err((next, e)),
+    }
 }
 
 /// One key of config.json.

@@ -1,6 +1,16 @@
 //! From irelia-companion's `riot/rate_limiter.rs`: Riot API request pacing, one RateLimiter per host. Request starts are spaced
 //! evenly (GCRA per window, a sliding log as backstop), method limits pace each endpoint family on top, waiters form
 //! one FIFO queue per host and at most `concurrency` requests are in flight.
+//!
+//! Build Fetcher shares its key with other apps (Irelia Companion), so our own log of starts is not the whole story:
+//! every answer's X-App-Rate-Limit-Count / X-Method-Rate-Limit-Count says how many requests Riot counted for the key,
+//! from every app. `observe_counts` feeds that in. Two things follow from it:
+//! - a request never starts while Riot's last count (plus what we started since) says it would go over the limit;
+//!   the block lasts until that count's window has surely ended (Riot's buckets are fixed windows that start on the
+//!   first request, so `seen + window` is the latest moment the counted requests can still be in it);
+//! - the pace slows to share what is left: each window's spacing is `window / (cap - foreign)`, where `foreign` is
+//!   Riot's count minus our own starts in the window (an under-estimate, never an over-estimate, so "shared" is
+//!   never claimed when no other app is spending).
 
 use crate::config::{PacingOptions, RateWindow};
 use crate::js::{js_max, js_min};
@@ -44,6 +54,44 @@ struct Lane {
     burst: f64,
     interval: f64,
     tat: f64,
+    /// Riot's last count for this window (every app on the key), when one has been seen.
+    seen: Option<Seen>,
+    /// Requests another app spent in this window, as estimated at `seen.at`.
+    foreign: f64,
+}
+
+/// One X-*-Rate-Limit-Count reading: `count` requests in the window, read at `at` from the answer to a request we
+/// started at `sent_at` (so that request is in `count`; ours started after it may not be).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Seen {
+    count: f64,
+    at: f64,
+    sent_at: f64,
+}
+
+/// One window of a budget as the fetcher sees it (for the dashboard meter).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowUsage {
+    pub limit: f64,
+    pub window_ms: f64,
+    /// Requests in the window by every app: Riot's last count plus ours since, or our own when Riot's is stale.
+    pub used: f64,
+    pub ours: f64,
+    /// Another app's share of `used` (0 when none was seen in this window).
+    pub foreign: f64,
+}
+
+/// "3:1,57:120" (X-App-Rate-Limit-Count) → (count, window). Unlike limits, a count may be 0.
+pub fn parse_counts(header: Option<&str>) -> Vec<RateWindow> {
+    let Some(h) = header.filter(|h| !h.is_empty()) else { return vec![] };
+    h.split(',')
+        .filter_map(|pair| {
+            let (c, w) = pair.trim().split_once(':')?;
+            let count: f64 = c.trim().parse().ok()?;
+            let s: f64 = w.trim().parse().ok()?;
+            (count >= 0.0 && s > 0.0 && count.is_finite() && s.is_finite()).then_some(RateWindow { limit: count, window_ms: s * 1000.0 })
+        })
+        .collect()
 }
 
 /// Paces one scope: the app limits of a host, or one endpoint family's method limits on that host.
@@ -75,12 +123,25 @@ impl Pacer {
         if same {
             return false;
         }
+        let old = std::mem::take(&mut self.lanes);
         self.lanes = limits
             .iter()
             .map(|l| {
                 let cap = js_max(1.0, (l.limit * self.o.safety).floor());
                 let burst = js_max(1.0, js_min(self.o.burst.floor(), l.limit - cap + 1.0));
-                let mut lane = Lane { limit: l.limit, window_ms: l.window_ms, cap, burst, interval: l.window_ms / cap, tat: 0.0 };
+                // A count Riot reported for this window stays true whatever the limits became.
+                let prev = old.iter().find(|o| o.window_ms == l.window_ms);
+                let mut lane = Lane {
+                    limit: l.limit,
+                    window_ms: l.window_ms,
+                    cap,
+                    burst,
+                    interval: l.window_ms / cap,
+                    tat: 0.0,
+                    seen: prev.and_then(|p| p.seen),
+                    foreign: prev.map(|p| p.foreign).unwrap_or(0.0),
+                };
+                lane.interval = lane.window_ms / js_max(1.0, lane.cap - lane.foreign);
                 for t in &self.starts {
                     lane.tat = js_max(lane.tat, *t) + lane.interval;
                 }
@@ -102,6 +163,7 @@ impl Pacer {
 
     pub fn earliest(&mut self, now: f64) -> f64 {
         self.prune(now);
+        self.forget_stale(now);
         let f = self.factor(now);
         let mut t = js_max(now, self.blocked_until);
         for i in 0..self.lanes.len() {
@@ -113,8 +175,73 @@ impl Pacer {
                 let idx = self.starts.len() - room as usize;
                 t = js_max(t, self.starts[idx] + lane.window_ms);
             }
+            // Riot's own count (every app on the key): never start the request that would go over it.
+            if let Some(seen) = lane.seen.filter(|s| now < s.at + lane.window_ms) {
+                if self.riot_estimate(&seen) + 1.0 > room {
+                    t = js_max(t, seen.at + lane.window_ms);
+                }
+            }
         }
         t
+    }
+
+    /// Requests in the window per Riot's last count: the count, plus ours started since the counted request (that
+    /// one is already in the count; others started at the same moment may not be, so they are added: when unsure,
+    /// count more).
+    fn riot_estimate(&self, seen: &Seen) -> f64 {
+        let since = self.starts.iter().rev().take_while(|t| **t >= seen.sent_at).count() as f64;
+        seen.count + js_max(0.0, since - 1.0)
+    }
+
+    /// Riot's X-*-Rate-Limit-Count for this scope, read from the answer to the request started at `sent_at`.
+    /// Returns true when it may change when the next request starts.
+    pub fn observe(&mut self, counts: &[RateWindow], sent_at: f64, now: f64) -> bool {
+        self.prune(now);
+        let mut changed = false;
+        for c in counts {
+            let Some(i) = self.lanes.iter().position(|l| l.window_ms == c.window_ms) else { continue };
+            // An answer to an older request (concurrent requests can answer out of order) says less than the newest.
+            if self.lanes[i].seen.map(|s| s.sent_at > sent_at).unwrap_or(false) {
+                continue;
+            }
+            let ours = self.in_window(c.window_ms, now) as f64;
+            let lane = &mut self.lanes[i];
+            let foreign = js_max(0.0, c.limit - ours);
+            lane.seen = Some(Seen { count: c.limit, at: now, sent_at });
+            if foreign != lane.foreign {
+                lane.foreign = foreign;
+                lane.interval = lane.window_ms / js_max(1.0, lane.cap - foreign);
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    /// Each window's usage now (the longest window is what the dashboard shows).
+    pub fn windows(&mut self, now: f64) -> Vec<WindowUsage> {
+        self.prune(now);
+        self.forget_stale(now);
+        let mut out = Vec::new();
+        for lane in &self.lanes {
+            let ours = self.in_window(lane.window_ms, now) as f64;
+            let fresh = lane.seen.filter(|s| now < s.at + lane.window_ms);
+            let (used, foreign) = match fresh {
+                Some(s) => (js_max(ours, self.riot_estimate(&s)), lane.foreign),
+                None => (ours, 0.0),
+            };
+            out.push(WindowUsage { limit: lane.limit, window_ms: lane.window_ms, used, ours, foreign });
+        }
+        out
+    }
+
+    /// Another app's share stops slowing us once the window it was seen in has surely ended.
+    fn forget_stale(&mut self, now: f64) {
+        for lane in &mut self.lanes {
+            if lane.foreign > 0.0 && lane.seen.map(|s| now >= s.at + lane.window_ms).unwrap_or(true) {
+                lane.foreign = 0.0;
+                lane.interval = lane.window_ms / lane.cap;
+            }
+        }
     }
 
     pub fn commit(&mut self, at: f64) {
@@ -479,6 +606,27 @@ impl RateLimiter {
         if changed {
             self.notify.notify_waiters();
         }
+    }
+
+    /// Riot's X-App-Rate-Limit-Count and X-Method-Rate-Limit-Count from an answer to the request started at
+    /// `sent_at`: requests every app spent on the key (see the module comment).
+    pub fn observe_counts(&self, family: &'static str, app_count: Option<&str>, method_count: Option<&str>, sent_at: f64) {
+        let now = self.now();
+        let changed = {
+            let mut st = self.state.lock();
+            let a = st.app.observe(&parse_counts(app_count), sent_at, now);
+            let m = st.method(family).observe(&parse_counts(method_count), sent_at, now);
+            a || m
+        };
+        if changed {
+            self.notify.notify_waiters();
+        }
+    }
+
+    /// The application budget's windows now (every app on the key, as far as Riot's counts tell).
+    pub fn app_windows(&self) -> Vec<WindowUsage> {
+        let now = self.now();
+        self.state.lock().app.windows(now)
     }
 
     /// Riot answered 429; returns how long the next request of this family waits.

@@ -1,8 +1,15 @@
 //! The Riot web API client (from irelia-companion): every call goes through a per-host rate limiter (one host per
-//! routing value). Answers are not cached here.
+//! routing value: `europe` for EUN1 + EUW1 match-v5, `asia` for KR, and each platform host for league-v4). Every
+//! answer's X-App-Rate-Limit-Count / X-Method-Rate-Limit-Count is fed to that limiter, so requests another app makes
+//! with the same key (Irelia Companion) slow this client down instead of tipping the key over its limit. 429s follow
+//! Retry-After; a service 429 without one backs off exponentially. Answers are not cached here.
+//!
+//! The key is only ever sent in the X-Riot-Token header: errors name the status and the path, never the key.
 
 use super::rate_limiter::{limit_scope, retry_after_ms, sleep, wall_clock, Clock, Pacer, RateLimiter, Signal};
 use super::routing::{account_host, is_apex, platform_host, regional_host};
+use super::transport::{HttpTransport, Transport};
+use crate::build::BudgetStatus;
 use crate::config::{PacingOptions, RateWindow};
 use anyhow::{anyhow, Result};
 use parking_lot::Mutex;
@@ -68,6 +75,21 @@ pub trait RiotApi: Send + Sync {
     fn champion_mastery(&self, platform: &str, puuid: &str, champion_id: i64, signal: &Signal, since: Option<i64>) -> impl Future<Output = Result<Option<MasteryDto>>> + Send;
     fn ranked_entries(&self, platform: &str, puuid: &str, signal: &Signal) -> impl Future<Output = Result<Vec<RankedEntry>>> + Send;
     fn match_ids(&self, platform: &str, puuid: &str, queue: i64, count: i64, signal: &Signal) -> impl Future<Output = Result<Vec<String>>> + Send;
+    /// One page of a non-apex league (`/entries/RANKED_SOLO_5x5/{tier}/{division}?page=`); apex tiers have one page.
+    /// The default asks `league_entries` for page 1 only (fakes that don't page).
+    fn league_page(&self, platform: &str, tier: &str, division: &str, page: i64, signal: &Signal) -> impl Future<Output = Result<Vec<LeagueEntry>>> + Send {
+        async move {
+            if page == 1 {
+                self.league_entries(platform, tier, &[division.to_string()], 1, signal).await
+            } else {
+                Ok(vec![])
+            }
+        }
+    }
+    /// Each routing value's budget as last seen (empty for fakes without one).
+    fn budgets(&self) -> Vec<BudgetStatus> {
+        vec![]
+    }
     fn match_ids_page(&self, platform: &str, puuid: &str, q: &MatchIdQuery, signal: &Signal) -> impl Future<Output = Result<Vec<String>>> + Send;
     fn get_match(&self, platform: &str, id: &str, signal: &Signal) -> impl Future<Output = Result<Option<Value>>> + Send;
     fn timeline(&self, platform: &str, id: &str, signal: &Signal) -> impl Future<Output = Result<Option<Value>>> + Send;
@@ -85,7 +107,7 @@ pub struct ThrottleInfo {
     pub wait_ms: f64,
 }
 
-pub struct RiotClient {
+pub struct RiotClient<T: Transport = HttpTransport> {
     pub request_timeout_ms: u64,
     pub requests: AtomicU64,
     pub default_pace_ms: f64,
@@ -94,14 +116,20 @@ pub struct RiotClient {
     pacing: PacingOptions,
     limiters: Mutex<indexmap::IndexMap<String, Arc<RateLimiter>>>,
     throttle: Mutex<Option<Arc<dyn Fn(ThrottleInfo) + Send + Sync>>>,
-    http: reqwest::Client,
+    http: T,
     clock: Clock,
     base_url: Mutex<Option<String>>,
 }
 
-impl RiotClient {
+impl RiotClient<HttpTransport> {
     pub fn new(api_key: &str, limits: Vec<RateWindow>, pacing: PacingOptions) -> RiotClient {
-        let clock = wall_clock();
+        RiotClient::with_transport(api_key, limits, pacing, HttpTransport::default(), wall_clock())
+    }
+}
+
+impl<T: Transport> RiotClient<T> {
+    /// A client over any transport and clock (tests: a simulated Riot on tokio's paused clock).
+    pub fn with_transport(api_key: &str, limits: Vec<RateWindow>, pacing: PacingOptions, transport: T, clock: Clock) -> RiotClient<T> {
         RiotClient {
             request_timeout_ms: REQUEST_TIMEOUT_MS,
             requests: AtomicU64::new(0),
@@ -111,16 +139,47 @@ impl RiotClient {
             pacing,
             limiters: Mutex::new(indexmap::IndexMap::new()),
             throttle: Mutex::new(None),
-            http: reqwest::Client::builder().gzip(true).build().expect("http client"),
+            http: transport,
             clock,
             base_url: Mutex::new(None),
         }
     }
 
     /// Tests: send every request to `base` (http://127.0.0.1:port) instead of https://host.
-    pub fn with_base_url(self, base: &str) -> RiotClient {
+    pub fn with_base_url(self, base: &str) -> RiotClient<T> {
         *self.base_url.lock() = Some(base.to_string());
         self
+    }
+
+    /// The transport (tests inspect their fake through it).
+    pub fn transport(&self) -> &T {
+        &self.http
+    }
+
+    /// Each host's application budget as the dashboard meter shows it: Riot's count in the longest window (every
+    /// app on the key), how much of it was ours, and whether another app is spending the same key.
+    pub fn budget_statuses(&self) -> Vec<BudgetStatus> {
+        let limiters: Vec<Arc<RateLimiter>> = self.limiters.lock().values().cloned().collect();
+        limiters
+            .iter()
+            .map(|l| {
+                let windows = l.app_windows();
+                let limits = windows.iter().map(|w| format!("{}:{}", w.limit, w.window_ms / 1000.0)).collect::<Vec<_>>().join(",");
+                let longest = windows.iter().copied().fold(None, |m: Option<super::rate_limiter::WindowUsage>, w| match m {
+                    Some(m) if m.window_ms >= w.window_ms => Some(m),
+                    _ => Some(w),
+                });
+                BudgetStatus {
+                    scope: budget_scope(&l.host),
+                    limits,
+                    used: longest.map(|w| w.used as u32).unwrap_or(0),
+                    ours: longest.map(|w| w.ours as u32).unwrap_or(0),
+                    limit: longest.map(|w| w.limit as u32).unwrap_or(0),
+                    window_s: longest.map(|w| (w.window_ms / 1000.0) as u32).unwrap_or(0),
+                    shared: windows.iter().any(|w| w.foreign > 0.0),
+                }
+            })
+            .collect()
     }
 
     pub fn set_api_key(&self, key: &str) {
@@ -183,14 +242,14 @@ impl RiotClient {
                 None => format!("https://{host}{path}"),
             };
             let key = self.api_key.lock().clone();
+            let sent_at = permit.started_at;
             let send = async {
-                let res = self.http.get(&url).header("X-Riot-Token", key).send().await?;
-                let headers = res.headers().clone();
-                let status = res.status().as_u16();
-                let h = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).map(String::from);
+                let res = self.http.get(&url, &key).await?;
+                let h = |k: &str| res.header(k).map(String::from);
                 limiter.update_limits(family, h("x-app-rate-limit").as_deref(), h("x-method-rate-limit").as_deref());
-                let body = if (200..300).contains(&status) { Some(res.json::<Value>().await?) } else { None };
-                Ok::<_, anyhow::Error>((status, body, h("x-rate-limit-type"), h("retry-after")))
+                // Every answer, 429s included: Riot's counts are how another app's use of the key shows up.
+                limiter.observe_counts(family, h("x-app-rate-limit-count").as_deref(), h("x-method-rate-limit-count").as_deref(), sent_at);
+                Ok::<_, anyhow::Error>((res.status, res.body.clone(), h("x-rate-limit-type"), h("retry-after")))
             };
             let outcome = tokio::select! {
                 r = tokio::time::timeout(Duration::from_millis(self.request_timeout_ms), send) => match r {
@@ -269,7 +328,30 @@ fn enc(s: &str) -> String {
     out
 }
 
-impl RiotApi for RiotClient {
+/// The dashboard's name for a host's budget: "EUROPE", "ASIA" for regional hosts, the platform ("euw1") otherwise.
+pub fn budget_scope(host: &str) -> String {
+    let first = host.split('.').next().unwrap_or(host);
+    match first {
+        "europe" | "asia" | "americas" | "sea" => first.to_uppercase(),
+        _ => first.to_string(),
+    }
+}
+
+impl<T: Transport> RiotApi for RiotClient<T> {
+    async fn league_page(&self, platform: &str, tier: &str, division: &str, page: i64, signal: &Signal) -> Result<Vec<LeagueEntry>> {
+        if is_apex(tier) {
+            return if page == 1 { self.league_entries(platform, tier, &[], 1, signal).await } else { Ok(vec![]) };
+        }
+        let host = platform_host(platform);
+        let res = self.get(&host, "league", &format!("/lol/league/v4/entries/RANKED_SOLO_5x5/{tier}/{division}?page={page}"), signal).await?;
+        let list: Vec<Value> = res.and_then(|r| r.as_array().cloned()).unwrap_or_default();
+        Ok(list.iter().map(|v| LeagueEntry { puuid: v["puuid"].as_str().unwrap_or("").to_string(), league_points: v["leaguePoints"].as_i64().unwrap_or(0) }).collect())
+    }
+
+    fn budgets(&self) -> Vec<BudgetStatus> {
+        self.budget_statuses()
+    }
+
     async fn league_entries(&self, platform: &str, tier: &str, divisions: &[String], max_pages: i64, signal: &Signal) -> Result<Vec<LeagueEntry>> {
         let host = platform_host(platform);
         let parse = |v: &Value| LeagueEntry { puuid: v["puuid"].as_str().unwrap_or("").to_string(), league_points: v["leaguePoints"].as_i64().unwrap_or(0) };

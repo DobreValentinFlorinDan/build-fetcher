@@ -74,7 +74,7 @@ pub fn make_match(s: &MatchSpec) -> Value {
                 "trueDamageDealtToChampions": 1500, "totalDamageTaken": 20_000, "damageSelfMitigated": 12_000,
                 "totalHeal": 3000, "totalHealsOnTeammates": if champion_id == 89 { 4000 } else { 0 }, "totalDamageShieldedOnTeammates": 0,
                 "timeCCingOthers": 20, "totalTimeCCDealt": 90, "timePlayed": minutes * 60,
-                "gameEndedInEarlySurrender": s.remake_vote.unwrap_or(false), "gameEndedInSurrender": false,
+                "gameEndedInEarlySurrender": s.remake_vote.unwrap_or(false), "gameEndedInSurrender": false, "teamEarlySurrendered": false,
                 "challenges": { "damagePerMinute": 600, "kda": 4, "soloKills": 1, "laningPhaseGoldExpAdvantage": 1, "unrelatedCosmetic": 3 },
             })
         })
@@ -85,6 +85,9 @@ pub fn make_match(s: &MatchSpec) -> Value {
             "gameVersion": s.version.clone().unwrap_or_else(|| "16.19.712.4471".into()),
             "queueId": s.queue.unwrap_or(420),
             "gameCreation": s.creation.unwrap_or_else(|| date_utc(2026, 8, 25)),
+            "gameStartTimestamp": s.creation.unwrap_or_else(|| date_utc(2026, 8, 25)) + 30_000,
+            "gameEndTimestamp": s.creation.unwrap_or_else(|| date_utc(2026, 8, 25)) + 30_000 + minutes * 60_000,
+            "mapId": 11,
             "gameDuration": minutes * 60, "endOfGameResult": "GameComplete",
             "platformId": s.id.split('_').next().unwrap_or(""),
             "participants": participants,
@@ -105,9 +108,17 @@ pub struct TimelineSpec {
 }
 
 pub fn make_timeline(m: &Value, spec: &TimelineSpec) -> Value {
-    let minutes = crate::js::round(m["info"]["gameDuration"].as_f64().unwrap() / 60.0) as i64;
     let ps = m["info"]["participants"].as_array().unwrap();
     let irelia = ps.iter().find(|p| p["championId"] == IRELIA).map(|p| p["participantId"].as_i64().unwrap()).unwrap_or(1);
+    make_timeline_for(m, spec, irelia)
+}
+
+/// `make_timeline` with the spec's skill-ups and item events given to participant `featured` (any champion, any
+/// role) instead of Irelia.
+pub fn make_timeline_for(m: &Value, spec: &TimelineSpec, featured: i64) -> Value {
+    let minutes = crate::js::round(m["info"]["gameDuration"].as_f64().unwrap() / 60.0) as i64;
+    let ps = m["info"]["participants"].as_array().unwrap();
+    let irelia = featured;
     let mut frames = Vec::new();
     for mm in 0..=minutes {
         let mut pf = Map::new();
@@ -170,6 +181,9 @@ pub fn make_timeline(m: &Value, spec: &TimelineSpec) -> Value {
         },
     })
 }
+
+pub use synth::{Synth, SynthGame, SynthOptions, SynthRng};
+mod synth;
 
 /// The tests' Data Dragon: the trimmed snapshot committed in fixtures/ddragon-snapshot.json.
 pub fn load_test_static_data() -> std::sync::Arc<crate::ddragon::StaticData> {

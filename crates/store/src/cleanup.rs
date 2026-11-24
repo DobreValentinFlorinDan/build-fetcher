@@ -81,7 +81,10 @@ impl Store {
 
     /// Hands free pages back to the file system and empties the WAL.
     fn compact(db: &Connection) -> Result<()> {
-        db.execute_batch("PRAGMA incremental_vacuum;")?;
+        // The pragma frees pages as it is stepped: run it to the end (one step frees one page).
+        let mut st = db.prepare("PRAGMA incremental_vacuum")?;
+        let mut rows = st.query([])?;
+        while rows.next()?.is_some() {}
         db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
         Ok(())
     }

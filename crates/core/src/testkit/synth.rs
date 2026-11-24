@@ -465,10 +465,12 @@ impl Synth {
                 let afk = plans[k].2;
                 let active = !afk || mm <= 2;
                 if mm > 0 {
-                    gold[k] += if active { [380.0, 370.0, 390.0, 400.0, 260.0][role] * if team == winner { 1.05 } else { 0.97 } } else { 122.0 };
+                    // Real games are uneven minute to minute (kills, waves, recalls): the jitter keeps the stored
+                    // frames from compressing better than real ones would.
+                    gold[k] += if active { [380.0, 370.0, 390.0, 400.0, 260.0][role] * if team == winner { 1.05 } else { 0.97 } + r.range(-150, 150) as f64 } else { 122.0 };
                     if active {
                         xp[k] += [560.0, 520.0, 600.0, 480.0, 380.0][role];
-                        cs[k] += [7, 6, 8, 8, 1][role];
+                        cs[k] += ([7, 6, 8, 8, 1][role] + r.range(-3, 4)).max(0);
                     }
                 }
                 let (x, y) = if active && (1..=14).contains(&mm) {

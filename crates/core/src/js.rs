@@ -419,3 +419,44 @@ pub fn floor_usize(x: f64) -> usize {
         0
     }
 }
+
+/// `Math.max(a, b)` (NaN wins; +0 beats -0).
+pub fn js_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a > b {
+        a
+    } else if b > a {
+        b
+    } else if a == 0.0 && b == 0.0 {
+        if a.is_sign_positive() || b.is_sign_positive() { 0.0 } else { -0.0 }
+    } else {
+        a
+    }
+}
+
+/// `Math.min(a, b)` (NaN wins; -0 beats +0).
+pub fn js_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a < b {
+        a
+    } else if b < a {
+        b
+    } else if a == 0.0 && b == 0.0 {
+        if a.is_sign_negative() || b.is_sign_negative() { -0.0 } else { 0.0 }
+    } else {
+        a
+    }
+}
+
+/// A comparator difference as an Ordering (0 and NaN are equal, as Array.prototype.sort treats them).
+pub fn js_order(d: f64) -> std::cmp::Ordering {
+    if d < 0.0 {
+        std::cmp::Ordering::Less
+    } else if d > 0.0 {
+        std::cmp::Ordering::Greater
+    } else {
+        std::cmp::Ordering::Equal
+    }
+}

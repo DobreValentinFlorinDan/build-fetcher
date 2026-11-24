@@ -29,7 +29,7 @@ pub fn available_memory() -> f64 {
 
 /// Left free whatever the evaluation does: the game, Windows and the rest of the app need it.
 pub fn memory_reserve(total: f64) -> f64 {
-    crate::model::logistic::js_max(1.5 * 1024f64.powi(3), 0.15 * total)
+    crate::js::js_max(1.5 * 1024f64.powi(3), 0.15 * total)
 }
 
 pub fn processor() -> Option<String> {

@@ -1,9 +1,9 @@
-//! Port of `server/riot/rateLimiter.ts`: Riot API request pacing, one RateLimiter per host. Request starts are spaced
+//! From irelia-companion's `riot/rate_limiter.rs`: Riot API request pacing, one RateLimiter per host. Request starts are spaced
 //! evenly (GCRA per window, a sliding log as backstop), method limits pace each endpoint family on top, waiters form
 //! one FIFO queue per host and at most `concurrency` requests are in flight.
 
 use crate::config::{PacingOptions, RateWindow};
-use crate::model::logistic::{js_max, js_min};
+use crate::js::{js_max, js_min};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};

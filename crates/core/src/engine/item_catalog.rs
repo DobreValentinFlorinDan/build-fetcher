@@ -2,7 +2,7 @@
 //! overlay's build plan needs.
 
 use super::exclusivity::{is_boots, ExclusivityIndex};
-use super::validator::is_completed_item;
+use super::items::is_completed_item;
 use crate::ddragon::{ItemMeta, StaticData};
 use crate::js;
 use serde_json::{json, Map, Value};

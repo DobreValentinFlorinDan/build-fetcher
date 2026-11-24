@@ -1,4 +1,5 @@
-//! Port of `server/config.ts`: the process's settings (paths, the API key, pacing, engine constants).
+//! The process's settings (paths, the API key, pacing), from irelia-companion's `config.rs` with Build Fetcher's
+//! identity: data under %APPDATA%/build-fetcher/data unless BF_DATA_DIR pins another folder.
 
 use crate::app_config;
 use crate::util;
@@ -12,7 +13,7 @@ pub struct RateWindow {
     pub window_ms: f64,
 }
 
-/// "20:1,100:120" → windows (riot/rateLimiter.ts parseLimits).
+/// "20:1,100:120" → windows (X-App-Rate-Limit / X-Method-Rate-Limit). Malformed pairs are skipped.
 pub fn parse_limits(header: Option<&str>) -> Vec<RateWindow> {
     let Some(h) = header.filter(|h| !h.is_empty()) else { return vec![] };
     h.split(',')
@@ -36,37 +37,23 @@ pub struct PacingOptions {
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// Empty when none is set. Never logged, never put in an error (see `mask_key`).
     pub riot_api_key: String,
     pub port: u16,
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
     pub ddragon_cache_dir: PathBuf,
-    pub riot_cache_dir: PathBuf,
     pub rate_limits: Vec<RateWindow>,
     pub pacing: PacingOptions,
     pub league_paths: Vec<PathBuf>,
 }
 
-pub const CHAMPION_ID: i64 = 39;
-pub const CHAMPION_KEY: &str = "Irelia";
 pub const RANKED_SOLO_QUEUE: i64 = 420;
-pub const RANKED_FLEX_QUEUE: i64 = 440;
-pub const RESEED_AFTER_MS: i64 = 6 * 3600_000;
-pub const RECHECK_OTP_AFTER_MS: i64 = 3 * 24 * 3600_000;
-pub const RECHECK_OTHERS_AFTER_MS: i64 = 14 * 24 * 3600_000;
-pub const RESCAN_PLAYER_AFTER_MS: i64 = 45 * 60_000;
-pub const RATE_SNAPSHOT_MS: u64 = 200;
-pub const MIN_MATCHUP_GAMES: f64 = 15.0;
-pub const GENERAL_PRIOR_WEIGHT: f64 = 0.15;
-pub const MIN_LANE_GAMES: f64 = 30.0;
-pub const OTHER_LANE_WEIGHT: f64 = 0.15;
-pub const PREVIOUS_PATCH_WEIGHT: f64 = 0.35;
-pub const MIN_CURRENT_PATCH_GAMES: f64 = 40.0;
-pub const STARTING_ITEM_WINDOW_MS: f64 = 60_000.0;
 pub const LIVE_POLL_MS: u64 = 1000;
 pub const LIVE_IDLE_POLL_MS: u64 = 3000;
 
-const DEV_KEY_LIMITS: &str = "20:1,100:120";
+/// A personal / development key's limits, until Riot's X-App-Rate-Limit header says otherwise.
+pub const DEFAULT_KEY_LIMITS: &str = "20:1,100:120";
 
 fn clamp_int(raw: Option<String>, lo: i64, hi: i64, fallback: i64) -> i64 {
     match raw {
@@ -82,37 +69,46 @@ fn clamp_int(raw: Option<String>, lo: i64, hi: i64, fallback: i64) -> i64 {
     }
 }
 
-/// data/ unless the user moved it: ./data in dev, %APPDATA%/irelia-companion/data in the installed app.
+/// %APPDATA%/build-fetcher/data (BF_DEFAULT_DATA_DIR overrides it, e.g. ./data in development).
 pub fn default_data_dir() -> PathBuf {
-    util::resolve(util::env("IRELIA_DEFAULT_DATA_DIR").unwrap_or_else(|| "data".into()))
+    match util::env("BF_DEFAULT_DATA_DIR") {
+        Some(d) => util::resolve(d),
+        None => app_config::app_config_dir().join("data"),
+    }
 }
 
-/// IRELIA_DATA_DIR pins the folder for this process and disables moving it.
+/// BF_DATA_DIR pins the folder for this process.
 pub fn data_dir_locked_by() -> Option<&'static str> {
-    util::env("IRELIA_DATA_DIR").map(|_| "IRELIA_DATA_DIR environment variable")
+    util::env("BF_DATA_DIR").map(|_| "BF_DATA_DIR environment variable")
 }
 
 pub struct DataPaths {
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
     pub ddragon_cache_dir: PathBuf,
-    pub riot_cache_dir: PathBuf,
 }
 
 pub fn data_paths(dir: &Path) -> DataPaths {
-    DataPaths {
-        data_dir: dir.to_path_buf(),
-        db_path: dir.join("irelia.db"),
-        ddragon_cache_dir: dir.join("ddragon"),
-        riot_cache_dir: dir.join("cache"),
+    DataPaths { data_dir: dir.to_path_buf(), db_path: dir.join("build-fetcher.db"), ddragon_cache_dir: dir.join("ddragon") }
+}
+
+/// A key as it may be shown or logged: "RGAPI-…1234" (never the whole key), or "" when none is set.
+pub fn mask_key(key: &str) -> String {
+    let k = key.trim();
+    if k.is_empty() {
+        return String::new();
     }
+    let tail: String = k.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    if k.chars().count() <= 8 {
+        return "…".into();
+    }
+    format!("{}…{tail}", if k.starts_with("RGAPI-") { "RGAPI-" } else { "" })
 }
 
 fn load() -> Config {
-    util::load_env_file(&util::resolve(".env"));
     let app = app_config::read_app_config();
-    let key = app.get("riotApiKey").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
-    let dir = util::env("IRELIA_DATA_DIR")
+    let key = app.get("riotApiKey").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string());
+    let dir = util::env("BF_DATA_DIR")
         .map(PathBuf::from)
         .or_else(|| app.get("dataDir").and_then(|v| v.as_str()).map(PathBuf::from))
         .unwrap_or_else(default_data_dir);
@@ -120,18 +116,17 @@ fn load() -> Config {
     let limits = {
         let custom = parse_limits(util::env("RIOT_RATE_LIMITS").as_deref());
         if custom.is_empty() {
-            parse_limits(Some(DEV_KEY_LIMITS))
+            parse_limits(Some(DEFAULT_KEY_LIMITS))
         } else {
             custom
         }
     };
     Config {
         riot_api_key: key.or_else(|| util::env("RIOT_API_KEY")).unwrap_or_default(),
-        port: util::env("PORT").and_then(|p| p.parse().ok()).unwrap_or(5174),
+        port: util::env("PORT").and_then(|p| p.parse().ok()).unwrap_or(5184),
         data_dir: p.data_dir,
         db_path: p.db_path,
         ddragon_cache_dir: p.ddragon_cache_dir,
-        riot_cache_dir: p.riot_cache_dir,
         rate_limits: limits,
         pacing: PacingOptions {
             safety: 0.9,
@@ -160,20 +155,42 @@ pub fn config() -> Config {
     CONFIG.read().clone()
 }
 
-/// Points every data path at a new folder (after a data-folder move). Callers reopen what they hold.
+/// Points every data path at a new folder. Callers reopen what they hold.
 pub fn set_data_dir(dir: &Path) {
     let p = data_paths(&util::resolve(dir));
     let mut c = CONFIG.write();
     c.data_dir = p.data_dir;
     c.db_path = p.db_path;
     c.ddragon_cache_dir = p.ddragon_cache_dir;
-    c.riot_cache_dir = p.riot_cache_dir;
 }
 
 pub fn set_riot_api_key(key: &str) {
-    CONFIG.write().riot_api_key = key.to_string();
+    CONFIG.write().riot_api_key = key.trim().to_string();
 }
 
 pub fn set_port(port: u16) {
     CONFIG.write().port = port;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masks_never_show_the_key() {
+        assert_eq!(mask_key(""), "");
+        assert_eq!(mask_key("short"), "…");
+        let k = "RGAPI-12345678-aaaa-bbbb-cccc-1234567890ab";
+        let m = mask_key(k);
+        assert_eq!(m, "RGAPI-…90ab");
+        assert!(!m.contains("12345678"));
+    }
+
+    #[test]
+    fn parses_limit_headers() {
+        let w = parse_limits(Some("20:1,100:120"));
+        assert_eq!(w, vec![RateWindow { limit: 20.0, window_ms: 1000.0 }, RateWindow { limit: 100.0, window_ms: 120_000.0 }]);
+        assert!(parse_limits(Some("x:y")).is_empty());
+        assert!(parse_limits(None).is_empty());
+    }
 }

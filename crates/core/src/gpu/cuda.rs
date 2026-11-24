@@ -94,9 +94,9 @@ struct Driver {
     cuLaunchKernel: unsafe extern "system" fn(Ptr, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, Ptr, *mut Ptr, *mut Ptr) -> c_int,
 }
 
-/// The driver library: IRELIA_CUDA_LIB overrides it (a stand-in for tests).
+/// The driver library: BF_CUDA_LIB overrides it (a stand-in for tests).
 fn driver_library() -> String {
-    std::env::var("IRELIA_CUDA_LIB").unwrap_or_else(|_| if cfg!(windows) { "nvcuda.dll".into() } else { "libcuda.so.1".into() })
+    std::env::var("BF_CUDA_LIB").unwrap_or_else(|_| if cfg!(windows) { "nvcuda.dll".into() } else { "libcuda.so.1".into() })
 }
 
 fn bind() -> R<Driver> {

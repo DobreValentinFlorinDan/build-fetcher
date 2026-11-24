@@ -1,5 +1,5 @@
 [package]
-name = "irelia"
+name = "bf-core"
 version.workspace = true
 edition.workspace = true
 publish = false
@@ -33,3 +33,6 @@ mimalloc = { version = "0.1.52", default-features = false }
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { version = "1", features = ["full", "test-util"] }
+
+[lib]
+name = "bf_core"

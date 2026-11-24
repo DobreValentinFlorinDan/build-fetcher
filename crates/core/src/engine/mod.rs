@@ -1,8 +1,6 @@
-pub mod adaptive;
+//! Item knowledge over Data Dragon, for every champion: exclusivity groups (one Mythic-like passive per build),
+//! completed items, boots, starting items, and the catalog the overlay's build plan reads.
+
 pub mod exclusivity;
-pub mod build_plan;
 pub mod item_catalog;
-pub mod lane_opponent;
-pub mod parse_match;
-pub mod recommend;
-pub mod validator;
+pub mod items;

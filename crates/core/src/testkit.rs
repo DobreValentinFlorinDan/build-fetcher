@@ -171,13 +171,13 @@ pub fn make_timeline(m: &Value, spec: &TimelineSpec) -> Value {
     })
 }
 
-/// The tests' Data Dragon: the trimmed snapshot committed in server/test/ddragon-snapshot.json.
+/// The tests' Data Dragon: the trimmed snapshot committed in fixtures/ddragon-snapshot.json.
 pub fn load_test_static_data() -> std::sync::Arc<crate::ddragon::StaticData> {
     use std::sync::OnceLock;
     static CACHED: OnceLock<std::sync::Arc<crate::ddragon::StaticData>> = OnceLock::new();
     CACHED
         .get_or_init(|| {
-            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../server/test/ddragon-snapshot.json");
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/ddragon-snapshot.json");
             let snap: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("ddragon snapshot")).unwrap();
             let raw = &snap["raw"];
             let r = crate::ddragon::RawStaticData {
@@ -185,10 +185,9 @@ pub fn load_test_static_data() -> std::sync::Arc<crate::ddragon::StaticData> {
                 champion: raw["champion"].clone(),
                 runes_reforged: raw["runesReforged"].clone(),
                 summoner: raw["summoner"].clone(),
-                champ: raw["champ"].clone(),
             };
             std::sync::Arc::new(
-                crate::ddragon::build_static_data(snap["version"].as_str().unwrap(), snap["previousPatch"].as_str().unwrap(), &r, None).unwrap(),
+                crate::ddragon::build_static_data(snap["version"].as_str().unwrap(), snap["previousPatch"].as_str().unwrap(), &r).unwrap(),
             )
         })
         .clone()

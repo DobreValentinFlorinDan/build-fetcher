@@ -1,9 +1,11 @@
-//! Port of `server/appConfig.ts`: per-user settings shared by the desktop shell and the server.
+//! Build Fetcher's per-user settings, shared by the desktop shell and the server (from irelia-companion's
+//! `app_config.rs`):
 //!
-//!   %APPDATA%/irelia-companion/config.json   (IRELIA_CONFIG_DIR overrides the folder, e.g. for tests)
+//!   %APPDATA%/build-fetcher/settings.json   (BF_CONFIG_DIR overrides the folder, e.g. for tests)
 //!
 //! Every write re-reads the file and merges only the caller's keys, then replaces the file atomically. Keys this
-//! version doesn't know are kept as they are, so 0.x and 1.0 can share the file.
+//! version doesn't know are kept as they are. Build Fetcher never writes anywhere else: Irelia Companion's folder is
+//! only ever read, and only its `riotApiKey` (see crates/store `key_import`).
 
 use crate::js;
 use crate::util;
@@ -11,11 +13,18 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 pub fn app_config_dir() -> PathBuf {
-    if let Some(d) = util::env("IRELIA_CONFIG_DIR") {
+    if let Some(d) = util::env("BF_CONFIG_DIR") {
         return util::resolve(d);
     }
-    let base = util::env("APPDATA").map(PathBuf::from).unwrap_or_else(|| home_dir().join(".config"));
-    util::resolve(base.join("irelia-companion"))
+    util::resolve(appdata_dir().join(APP_DIR_NAME))
+}
+
+/// The folder name under %APPDATA%: settings, data, logs.
+pub const APP_DIR_NAME: &str = "build-fetcher";
+
+/// %APPDATA% (Windows), else ~/.config.
+pub fn appdata_dir() -> PathBuf {
+    util::env("APPDATA").map(PathBuf::from).unwrap_or_else(|| home_dir().join(".config"))
 }
 
 pub fn home_dir() -> PathBuf {
@@ -23,7 +32,7 @@ pub fn home_dir() -> PathBuf {
 }
 
 pub fn app_config_file() -> PathBuf {
-    app_config_dir().join("config.json")
+    app_config_dir().join("settings.json")
 }
 
 /// config.json as stored (an empty object when missing or unreadable).
@@ -67,14 +76,4 @@ pub fn get_str(key: &str) -> Option<String> {
 
 pub fn get_bool(key: &str) -> Option<bool> {
     get(key).and_then(|v| v.as_bool())
-}
-
-/// scrape.config.json next to config.json wins over the repo / bundled copy.
-pub fn scope_file() -> PathBuf {
-    let user = app_config_dir().join("scrape.config.json");
-    if user.exists() {
-        user
-    } else {
-        util::resolve("scrape.config.json")
-    }
 }

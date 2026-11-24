@@ -1,6 +1,6 @@
-//! Port of `server/riot/client.ts`: every call is disk-cache first; misses go through a per-host rate limiter.
+//! The Riot web API client (from irelia-companion): every call goes through a per-host rate limiter (one host per
+//! routing value). Answers are not cached here.
 
-use super::disk_cache::DiskCache;
 use super::rate_limiter::{limit_scope, retry_after_ms, sleep, wall_clock, Clock, Pacer, RateLimiter, Signal};
 use super::routing::{account_host, is_apex, platform_host, regional_host};
 use crate::config::{PacingOptions, RateWindow};
@@ -90,7 +90,6 @@ pub struct RiotClient {
     pub requests: AtomicU64,
     pub default_pace_ms: f64,
     api_key: Mutex<String>,
-    cache: Arc<Mutex<DiskCache>>,
     limits: Vec<RateWindow>,
     pacing: PacingOptions,
     limiters: Mutex<indexmap::IndexMap<String, Arc<RateLimiter>>>,
@@ -101,14 +100,13 @@ pub struct RiotClient {
 }
 
 impl RiotClient {
-    pub fn new(api_key: &str, cache: Arc<Mutex<DiskCache>>, limits: Vec<RateWindow>, pacing: PacingOptions) -> RiotClient {
+    pub fn new(api_key: &str, limits: Vec<RateWindow>, pacing: PacingOptions) -> RiotClient {
         let clock = wall_clock();
         RiotClient {
             request_timeout_ms: REQUEST_TIMEOUT_MS,
             requests: AtomicU64::new(0),
             default_pace_ms: Pacer::new(&limits, pacing).spacing(clock()),
             api_key: Mutex::new(api_key.to_string()),
-            cache,
             limits,
             pacing,
             limiters: Mutex::new(indexmap::IndexMap::new()),
@@ -125,9 +123,6 @@ impl RiotClient {
         self
     }
 
-    pub fn cache_hits(&self) -> u64 {
-        self.cache.lock().hits
-    }
     pub fn set_api_key(&self, key: &str) {
         *self.api_key.lock() = key.to_string();
     }
@@ -168,7 +163,7 @@ impl RiotClient {
         }
         let f = |h: &Value, k: &str| h[k].as_f64().unwrap_or(0.0);
         let mut recent: Vec<&Value> = hosts.iter().filter(|h| f(h, "queued") > 0.0 || f(h, "inFlight") > 0.0 || now - f(h, "lastStartAt") < 3000.0).collect();
-        recent.sort_by(|a, b| crate::engine::recommend::js_order(f(b, "lastStartAt") - f(a, "lastStartAt")));
+        recent.sort_by(|a, b| crate::js::js_order(f(b, "lastStartAt") - f(a, "lastStartAt")));
         json!({
             "hosts": hosts.clone(),
             "busiest": busiest.map(|b| b["host"].clone()),
@@ -226,7 +221,7 @@ impl RiotClient {
             }
             if status == 401 || status == 403 {
                 return Err(anyhow!(RiotAuthError(format!(
-                    "Riot API rejected the key ({status}). Development keys expire every 24h - update RIOT_API_KEY in .env."
+                    "Riot API rejected the key ({status}). Check the key in Settings (developer.riotgames.com)."
                 ))));
             }
             if status == 429 {
@@ -249,19 +244,10 @@ impl RiotClient {
         }
     }
 
-    /// Cache-first GET. `None` (404) results are not cached.
+    /// GET (the `fresh` / `since` arguments are kept for the call sites; nothing is cached).
     #[allow(clippy::too_many_arguments)]
-    async fn cached(&self, kind: &'static str, scope: &str, key: &str, host: &str, path: &str, signal: &Signal, fresh: bool, since: Option<i64>) -> Result<Option<Value>> {
-        if !fresh {
-            if let Some(hit) = self.cache.lock().get(kind, scope, key, since) {
-                return Ok(Some(hit));
-            }
-        }
-        let value = self.get(host, kind, path, signal).await?;
-        if let Some(v) = &value {
-            self.cache.lock().set(kind, scope, key, v)?;
-        }
-        Ok(value)
+    async fn cached(&self, kind: &'static str, _scope: &str, _key: &str, host: &str, path: &str, signal: &Signal, _fresh: bool, _since: Option<i64>) -> Result<Option<Value>> {
+        self.get(host, kind, path, signal).await
     }
 }
 

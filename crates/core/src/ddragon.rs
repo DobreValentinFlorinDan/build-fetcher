@@ -1,11 +1,12 @@
-//! Port of `server/ddragon.ts`: Data Dragon's static data (items, champions, runes, summoners, Irelia's spells),
-//! cached per version under `<data>/ddragon/<version>/`, and the fingerprints patch memory compares.
+//! Data Dragon's static data for every champion (items, champions, runes, summoners), cached per version under
+//! `<data>/ddragon/<version>/`. From irelia-companion's `ddragon.rs`, without its one-champion parts: a champion's
+//! spells are read on demand (`load_champion_spells`).
 
-use crate::config::{config, CHAMPION_KEY};
+use crate::config::config;
 use crate::js;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -89,12 +90,6 @@ pub struct Spell {
     pub image: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Fingerprints {
-    pub items: HashMap<i64, String>,
-    pub champion: String,
-}
-
 #[derive(Clone, Debug)]
 pub struct StaticData {
     pub version: String,
@@ -108,10 +103,6 @@ pub struct StaticData {
     pub runes: Vec<RuneTree>,
     pub rune_ids: HashSet<i64>,
     pub summoners: indexmap::IndexMap<i64, Summoner>,
-    pub spells: Vec<Spell>,
-    pub fingerprints: Fingerprints,
-    pub previous: Option<(String, Fingerprints)>,
-    pub history: Option<HashMap<String, Fingerprints>>,
     pub versions: Option<Vec<String>>,
 }
 
@@ -198,80 +189,6 @@ async fn cached(dir: &Path, version: &str, file: &str, url: &str) -> Result<Valu
     Ok(data)
 }
 
-/// Items and Irelia as comparable strings: gold, stats and text for items; stats, spell values and texts for Irelia.
-pub fn fingerprints(item: &Value, champ: &Value) -> Fingerprints {
-    let mut items = HashMap::new();
-    if let Some(data) = item.get("data").and_then(|d| d.as_object()) {
-        for (id, it) in js::entries(data) {
-            let fp = json!([
-                it.get("gold").and_then(|g| g.get("total")).cloned().unwrap_or(Value::Null),
-                it.get("stats").cloned().unwrap_or_else(|| json!({})),
-                it.get("description").cloned().unwrap_or(Value::Null)
-            ]);
-            items.insert(id.parse::<i64>().unwrap_or(0), js::stringify(&fp));
-        }
-    }
-    let c = champ.get("data").and_then(|d| d.get(CHAMPION_KEY));
-    let undef = |v: Option<&Value>| v.cloned().unwrap_or(Value::Null);
-    let spells: Vec<Value> = c
-        .and_then(|c| c.get("spells"))
-        .and_then(|s| s.as_array())
-        .map(|a| {
-            a.iter()
-                .map(|s| {
-                    json!([
-                        undef(s.get("tooltip")),
-                        undef(s.get("cooldown")),
-                        undef(s.get("cost")),
-                        undef(s.get("effect")),
-                        undef(s.get("datavalues")),
-                        undef(s.get("range"))
-                    ])
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut m = Map::new();
-    m.insert("stats".into(), c.and_then(|c| c.get("stats")).cloned().unwrap_or_else(|| json!({})));
-    m.insert("spells".into(), Value::Array(spells));
-    m.insert(
-        "passive".into(),
-        c.and_then(|c| c.get("passive")).and_then(|p| p.get("description")).cloned().unwrap_or_else(|| json!("")),
-    );
-    Fingerprints { items, champion: js::stringify(&Value::Object(m)) }
-}
-
-/// The newest version of each of the `count` newest patches in `versions` (newest first), by patch.
-pub fn history_versions(versions: &[String], count: usize) -> Vec<(String, String)> {
-    let mut newest: Vec<(String, String)> = Vec::new();
-    for v in versions {
-        let p = to_patch(v);
-        if !newest.iter().any(|(q, _)| *q == p) {
-            newest.push((p, v.clone()));
-        }
-        if newest.len() >= count {
-            break;
-        }
-    }
-    newest
-}
-
-/// Fingerprints of the newest version of each of the `count` newest patches (cached on disk, fetched once). A patch
-/// whose files can't be had is left out: patch memory then treats it as unknown.
-pub async fn load_patch_history(versions: &[String], count: usize) -> HashMap<String, Fingerprints> {
-    let dir = config().ddragon_cache_dir;
-    let mut out = HashMap::new();
-    for (patch, version) in history_versions(versions, count) {
-        let base = format!("{CDN}/cdn/{version}/data/en_US");
-        let item = cached(&dir, &version, "item.json", &format!("{base}/item.json")).await;
-        let champ = cached(&dir, &version, &format!("{CHAMPION_KEY}.json"), &format!("{base}/champion/{CHAMPION_KEY}.json")).await;
-        if let (Ok(item), Ok(champ)) = (item, champ) {
-            out.insert(patch, fingerprints(&item, &champ));
-        }
-    }
-    out
-}
-
 /// The newest Data Dragon version and its files (cached on disk). `known` skips asking for the version list again.
 pub async fn load_static_data(known: Option<&[String]>) -> Result<StaticData> {
     let dir = config().ddragon_cache_dir;
@@ -294,25 +211,14 @@ pub async fn load_static_data(known: Option<&[String]>) -> Result<StaticData> {
     let version = versions[0].clone();
     let patch = to_patch(&version);
     let previous_patch = versions.iter().map(|v| to_patch(v)).find(|p| *p != patch).unwrap_or_else(|| patch.clone());
-    let previous_version = versions.iter().find(|v| to_patch(v) == previous_patch && previous_patch != patch).cloned();
     let base = format!("{CDN}/cdn/{version}/data/en_US");
     let raw = RawStaticData {
         item: cached(&dir, &version, "item.json", &format!("{base}/item.json")).await?,
         champion: cached(&dir, &version, "champion.json", &format!("{base}/champion.json")).await?,
         runes_reforged: cached(&dir, &version, "runesReforged.json", &format!("{base}/runesReforged.json")).await?,
         summoner: cached(&dir, &version, "summoner.json", &format!("{base}/summoner.json")).await?,
-        champ: cached(&dir, &version, &format!("{CHAMPION_KEY}.json"), &format!("{base}/champion/{CHAMPION_KEY}.json")).await?,
     };
-    let mut previous = None;
-    if let Some(pv) = previous_version {
-        let pb = format!("{CDN}/cdn/{pv}/data/en_US");
-        let item = cached(&dir, &pv, "item.json", &format!("{pb}/item.json")).await;
-        let champ = cached(&dir, &pv, &format!("{CHAMPION_KEY}.json"), &format!("{pb}/champion/{CHAMPION_KEY}.json")).await;
-        if let (Ok(item), Ok(champ)) = (item, champ) {
-            previous = Some((pv, item, champ));
-        }
-    }
-    let mut data = build_static_data(&version, &previous_patch, &raw, previous.as_ref().map(|(v, i, c)| (v.as_str(), i, c)))?;
+    let mut data = build_static_data(&version, &previous_patch, &raw)?;
     data.versions = Some(versions.into_iter().take(40).collect());
     Ok(data)
 }
@@ -323,7 +229,6 @@ pub struct RawStaticData {
     pub champion: Value,
     pub runes_reforged: Value,
     pub summoner: Value,
-    pub champ: Value,
 }
 
 fn passives(desc: &str) -> Vec<String> {
@@ -367,7 +272,6 @@ pub fn build_static_data(
     version: &str,
     previous_patch: &str,
     raw: &RawStaticData,
-    previous: Option<(&str, &Value, &Value)>,
 ) -> Result<StaticData> {
     let patch = to_patch(version);
     let mut items = BTreeMap::new();
@@ -456,23 +360,6 @@ pub fn build_static_data(
         }
     }
 
-    let keys = ["Q", "W", "E", "R"];
-    let spells: Vec<Spell> = raw
-        .champ
-        .get("data")
-        .and_then(|d| d.get(CHAMPION_KEY))
-        .and_then(|c| c.get("spells"))
-        .and_then(|s| s.as_array())
-        .ok_or_else(|| anyhow!("{CHAMPION_KEY}.json has no spells"))?
-        .iter()
-        .enumerate()
-        .map(|(i, s)| Spell {
-            key: keys.get(i).copied().unwrap_or("undefined").into(),
-            name: s.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
-            image: s.get("image").and_then(|i| i.get("full")).and_then(|v| v.as_str()).unwrap_or("").into(),
-        })
-        .collect();
-
     Ok(StaticData {
         version: version.into(),
         patch,
@@ -483,10 +370,36 @@ pub fn build_static_data(
         runes,
         rune_ids,
         summoners,
-        spells,
-        fingerprints: fingerprints(&raw.item, &raw.champ),
-        previous: previous.map(|(v, i, c)| (v.to_string(), fingerprints(i, c))),
-        history: None,
         versions: None,
     })
+}
+
+/// A champion's Q/W/E/R (names and icons), from `champion/<key>.json` of `version` (cached on disk).
+pub async fn load_champion_spells(version: &str, champion_key: &str) -> Result<Vec<Spell>> {
+    if champion_key.is_empty() || !champion_key.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(anyhow!("not a champion key: {champion_key:?}"));
+    }
+    let dir = config().ddragon_cache_dir;
+    let url = format!("{CDN}/cdn/{version}/data/en_US/champion/{champion_key}.json");
+    let raw = cached(&dir, version, &format!("champion-{champion_key}.json"), &url).await?;
+    spells_of(&raw, champion_key)
+}
+
+/// The spells of `champion/<key>.json` as Data Dragon serves it.
+pub fn spells_of(raw: &Value, champion_key: &str) -> Result<Vec<Spell>> {
+    let keys = ["Q", "W", "E", "R"];
+    Ok(raw
+        .get("data")
+        .and_then(|d| d.get(champion_key))
+        .and_then(|c| c.get("spells"))
+        .and_then(|s| s.as_array())
+        .ok_or_else(|| anyhow!("{champion_key}.json has no spells"))?
+        .iter()
+        .enumerate()
+        .map(|(i, s)| Spell {
+            key: keys.get(i).copied().unwrap_or("?").into(),
+            name: s.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
+            image: s.get("image").and_then(|i| i.get("full")).and_then(|v| v.as_str()).unwrap_or("").into(),
+        })
+        .collect())
 }

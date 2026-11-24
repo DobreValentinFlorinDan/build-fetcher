@@ -1,6 +1,6 @@
-//! Use GPU (0.13.0; ported in 1.1.0): an evaluation's draft similarities on an NVIDIA graphics card, with the same
-//! numbers as the processor's (checked before and while it runs).
+//! GPU support carried over from irelia-companion: the NVIDIA driver's CUDA interface loaded at run time (no install,
+//! no link-time dependency), its PTX kernel for weighted similarities, and the GPU log shown in Settings. The
+//! learning backends (crates/learn) decide what runs here and check it against the processor.
 
-pub mod accelerate;
 pub mod cuda;
 pub mod log;

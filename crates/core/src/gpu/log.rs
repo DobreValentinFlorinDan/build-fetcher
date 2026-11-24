@@ -1,4 +1,4 @@
-//! Port of `server/gpu/log.ts`: Use GPU's log, %APPDATA%/irelia-companion/gpu.log, shown in Settings → GPU. What the
+//! The GPU log, %APPDATA%/build-fetcher/gpu.log, shown in Settings → GPU. What the
 //! GPU was found to be, the checks and what it did; nothing else goes in it. Kept under about half a megabyte: past
 //! that, its older half goes.
 

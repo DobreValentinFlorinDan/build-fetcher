@@ -2,7 +2,7 @@
 //! Electron's own results, made by parity/math-fixtures.mjs. pow is the app's own, correctly rounded: its fixture's
 //! results come from 400-bit arithmetic (parity/pow-fixtures.py). A larger set, when present at $IRELIA_MATH_FIXTURES
 //! (the same scripts with more rows), is checked too.
-use irelia::jsmath;
+use bf_core::jsmath;
 
 fn floats(path: &std::path::Path) -> Vec<f64> {
     let b = std::fs::read(path).unwrap();

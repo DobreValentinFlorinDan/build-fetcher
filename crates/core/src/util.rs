@@ -143,10 +143,29 @@ pub fn measure(target: &Path) -> (u64, u64) {
 
 /// A random v4 UUID (crypto.randomUUID's shape), from the process's random source.
 pub fn random_uuid() -> String {
-    let h = crate::model::run_eval::random_hex(16);
+    let h = random_hex(16);
     let mut b: Vec<u8> = (0..16).map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap_or(0)).collect();
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let x: String = b.iter().map(|v| format!("{v:02x}")).collect();
     format!("{}-{}-{}-{}-{}", &x[0..8], &x[8..12], &x[12..16], &x[16..20], &x[20..32])
+}
+
+/// `n` random bytes as hex (time, process id and a xorshift, hashed with SHA-256). Not for secrets.
+pub fn random_hex(n: usize) -> String {
+    use sha2::Digest;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) as u64
+        ^ ((std::process::id() as u64) << 32)
+        ^ COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    let mut out = String::new();
+    for _ in 0..n.max(1) {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        out.push_str(&format!("{:02x}", (seed >> 24) as u8));
+    }
+    let h = sha2::Sha256::digest(out.as_bytes());
+    h.iter().cycle().take(n).map(|b| format!("{b:02x}")).collect()
 }

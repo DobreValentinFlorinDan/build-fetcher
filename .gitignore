@@ -6,3 +6,4 @@ dist-server/
 dist-desktop/
 release/
 /target
+.claude/worktrees/

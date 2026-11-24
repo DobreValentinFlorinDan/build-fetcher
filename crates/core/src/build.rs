@@ -164,6 +164,39 @@ pub enum DamageProfile {
     Mixed,
 }
 
+impl DamageProfile {
+    /// One champion's expected share of magic damage, from Data Dragon's 0-10 `attack` and `magic` ratings. Squared,
+    /// because the ratings are coarse and a 3/8 mage still deals almost all magic damage; None for an unknown champion.
+    pub fn magic_share_of(data: &crate::ddragon::StaticData, champion: i64) -> Option<f64> {
+        let c = data.champion(champion)?;
+        let (a, m) = (c.info.attack * c.info.attack, c.info.magic * c.info.magic);
+        Some(if a + m > 0.0 { m / (a + m) } else { 0.5 })
+    }
+
+    /// A team's mean magic share (unknown champions skipped); None when none is known.
+    pub fn magic_share(data: &crate::ddragon::StaticData, champions: &[i64]) -> Option<f64> {
+        let known: Vec<f64> = champions.iter().filter_map(|c| DamageProfile::magic_share_of(data, *c)).collect();
+        (!known.is_empty()).then(|| known.iter().sum::<f64>() / known.len() as f64)
+    }
+
+    /// The profile of a magic share: >= 0.65 Magic, <= 0.35 Physical, else Mixed.
+    pub fn from_magic_share(share: f64) -> DamageProfile {
+        if share >= 0.65 {
+            DamageProfile::Magic
+        } else if share <= 0.35 {
+            DamageProfile::Physical
+        } else {
+            DamageProfile::Mixed
+        }
+    }
+
+    /// The enemy team's profile from its champions. The store's counts and the learner's contexts both use this, so
+    /// a count's `enemy_profile` means the same thing on both sides.
+    pub fn of_team(data: &crate::ddragon::StaticData, champions: &[i64]) -> Option<DamageProfile> {
+        DamageProfile::magic_share(data, champions).map(DamageProfile::from_magic_share)
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ build options
 
 /// One decision a build is made of.

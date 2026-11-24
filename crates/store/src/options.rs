@@ -12,10 +12,8 @@
 //! Order-dependent options need the purchase order, which only the timeline has: games without one give RunePage,
 //! Keystone, Summoners and Boots only (final-inventory slots are not purchase order: players move items around).
 //!
-//! Damage profile: each enemy champion's magic share is Data Dragon's `info.magic / (info.attack + info.magic)`;
-//! when both are 0 the tags decide (Mage 0.8; Marksman, Fighter, Assassin 0.2; otherwise 0.5). The team share is
-//! the weighted mean, the support weighing half (supports deal far less damage). ≥ 0.65 magic → Magic, ≤ 0.35 →
-//! Physical (≥ 65% physical), else Mixed, as `DamageProfile` documents.
+//! Damage profile: `bf_core::build::DamageProfile::of_team`, the one rule the store's counts and the learner's
+//! queries share (a count stored under "Magic" must be the count the recommender asks for under "Magic").
 
 use bf_core::build::{BuildOption, DamageProfile, MatchRecord, PlayerRecord, Role};
 use bf_core::ddragon::StaticData;
@@ -91,38 +89,10 @@ pub fn player_options(p: &PlayerRecord, data: &StaticData, has_timeline: bool) -
     out
 }
 
-fn magic_share(data: &StaticData, champion: i64) -> f64 {
-    let Some(c) = data.champion(champion) else { return 0.5 };
-    let (a, m) = (c.info.attack, c.info.magic);
-    if a + m > 0.0 {
-        return m / (a + m);
-    }
-    let has = |t: &str| c.tags.iter().any(|x| x == t);
-    if has("Mage") {
-        0.8
-    } else if has("Marksman") || has("Fighter") || has("Assassin") {
-        0.2
-    } else {
-        0.5
-    }
-}
-
-/// The damage profile of a team (champions with their roles when known).
+/// The damage profile of a team (roles are accepted for callers' convenience; the shared rule ignores them).
 pub fn damage_profile(team: &[(i64, Option<Role>)], data: &StaticData) -> DamageProfile {
-    let (mut sum, mut weight) = (0.0, 0.0);
-    for (c, role) in team {
-        let w = if *role == Some(Role::Utility) { 0.5 } else { 1.0 };
-        sum += w * magic_share(data, *c);
-        weight += w;
-    }
-    let share = if weight > 0.0 { sum / weight } else { 0.5 };
-    if share >= 0.65 {
-        DamageProfile::Magic
-    } else if share <= 0.35 {
-        DamageProfile::Physical
-    } else {
-        DamageProfile::Mixed
-    }
+    let champions: Vec<i64> = team.iter().map(|(c, _)| *c).collect();
+    DamageProfile::of_team(data, &champions).unwrap_or(DamageProfile::Mixed)
 }
 
 /// The damage profile of the team facing player `i`.

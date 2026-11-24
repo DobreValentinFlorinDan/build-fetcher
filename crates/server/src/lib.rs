@@ -13,6 +13,8 @@ pub mod logging;
 pub mod routes;
 pub mod serve;
 pub mod static_data;
+pub mod wire_learn;
+pub mod wire_store;
 pub mod wiring;
 
 #[cfg(test)]

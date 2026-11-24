@@ -184,6 +184,8 @@ pub fn make_timeline_for(m: &Value, spec: &TimelineSpec, featured: i64) -> Value
 
 pub use synth::{Synth, SynthGame, SynthOptions, SynthRng};
 mod synth;
+pub use sim_riot::{Handler, SimCall, SimRiot};
+mod sim_riot;
 
 /// The tests' Data Dragon: the trimmed snapshot committed in fixtures/ddragon-snapshot.json.
 pub fn load_test_static_data() -> std::sync::Arc<crate::ddragon::StaticData> {

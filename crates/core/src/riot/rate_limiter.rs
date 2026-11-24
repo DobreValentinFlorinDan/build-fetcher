@@ -5,12 +5,15 @@
 //! Build Fetcher shares its key with other apps (Irelia Companion), so our own log of starts is not the whole story:
 //! every answer's X-App-Rate-Limit-Count / X-Method-Rate-Limit-Count says how many requests Riot counted for the key,
 //! from every app. `observe_counts` feeds that in. Two things follow from it:
-//! - a request never starts while Riot's last count (plus what we started since) says it would go over the limit;
-//!   the block lasts until that count's window has surely ended (Riot's buckets are fixed windows that start on the
-//!   first request, so `seen + window` is the latest moment the counted requests can still be in it);
+//! - a request never starts while Riot's last count (plus what we started since, plus what the other app is
+//!   expected to spend before the bucket ends) says it would go over the limit;
+//! - Riot's buckets are fixed windows that start with their first request. The bucket a count belongs to started
+//!   no later than the first of our requests answered in it (`first_sent`), so it surely ends by
+//!   `first_sent + window`: a block lasts until then at most, and the count is forgotten after. A new bucket is
+//!   recognised when a count is lower than the last one plus the requests we started in between;
 //! - the pace slows to share what is left: each window's spacing is `window / (cap - foreign)`, where `foreign` is
-//!   Riot's count minus our own starts in the window (an under-estimate, never an over-estimate, so "shared" is
-//!   never claimed when no other app is spending).
+//!   the other app's rate per window, from Riot's count minus our own requests counted in the same bucket, over
+//!   the time the bucket has run (at least a tenth of the window, so one early request doesn't look like a flood).
 
 use crate::config::{PacingOptions, RateWindow};
 use crate::js::{js_max, js_min};
@@ -56,8 +59,10 @@ struct Lane {
     tat: f64,
     /// Riot's last count for this window (every app on the key), when one has been seen.
     seen: Option<Seen>,
-    /// Requests another app spent in this window, as estimated at `seen.at`.
+    /// Another app's expected requests per window (its rate in the current bucket).
     foreign: f64,
+    /// Another app's requests in the current bucket, as of `seen`.
+    foreign_now: f64,
 }
 
 /// One X-*-Rate-Limit-Count reading: `count` requests in the window, read at `at` from the answer to a request we
@@ -67,6 +72,14 @@ struct Seen {
     count: f64,
     at: f64,
     sent_at: f64,
+    /// The first of our requests answered in this bucket (the bucket started no later).
+    first_sent: f64,
+}
+
+impl Seen {
+    fn ends_by(&self, window_ms: f64) -> f64 {
+        self.first_sent + window_ms
+    }
 }
 
 /// One window of a budget as the fetcher sees it (for the dashboard meter).
@@ -140,6 +153,7 @@ impl Pacer {
                     tat: 0.0,
                     seen: prev.and_then(|p| p.seen),
                     foreign: prev.map(|p| p.foreign).unwrap_or(0.0),
+                    foreign_now: prev.map(|p| p.foreign_now).unwrap_or(0.0),
                 };
                 lane.interval = lane.window_ms / js_max(1.0, lane.cap - lane.foreign);
                 for t in &self.starts {
@@ -176,9 +190,18 @@ impl Pacer {
                 t = js_max(t, self.starts[idx] + lane.window_ms);
             }
             // Riot's own count (every app on the key): never start the request that would go over it.
-            if let Some(seen) = lane.seen.filter(|s| now < s.at + lane.window_ms) {
-                if self.riot_estimate(&seen) + 1.0 > room {
-                    t = js_max(t, seen.at + lane.window_ms);
+            if let Some(seen) = lane.seen.filter(|s| now < s.ends_by(lane.window_ms)) {
+                let est = self.riot_estimate(&seen);
+                let end = seen.ends_by(lane.window_ms);
+                if est + 1.0 > room {
+                    t = js_max(t, end);
+                } else {
+                    // Leave room for what the other app is expected to spend before the bucket ends; when that is
+                    // what blocks, look again one spacing later (the estimate shrinks as the end nears).
+                    let reserve = (lane.foreign * (end - now) / lane.window_ms).floor();
+                    if est + 1.0 + reserve > room {
+                        t = js_max(t, js_min(end, now + lane.window_ms / lane.cap));
+                    }
                 }
             }
         }
@@ -204,10 +227,26 @@ impl Pacer {
             if self.lanes[i].seen.map(|s| s.sent_at > sent_at).unwrap_or(false) {
                 continue;
             }
-            let ours = self.in_window(c.window_ms, now) as f64;
+            let first_sent = match self.lanes[i].seen {
+                Some(p) if sent_at < p.ends_by(c.window_ms) => {
+                    // Our requests between the two are in the count unless the bucket was renewed.
+                    let between = self.starts.iter().filter(|t| **t > p.sent_at && **t <= sent_at).count() as f64;
+                    if c.limit < p.count + between {
+                        sent_at
+                    } else {
+                        p.first_sent
+                    }
+                }
+                _ => sent_at,
+            };
+            // Ours in this count: started from the bucket's first answered request up to this one.
+            let counted = self.starts.iter().filter(|t| **t >= first_sent && **t <= sent_at).count() as f64;
             let lane = &mut self.lanes[i];
-            let foreign = js_max(0.0, c.limit - ours);
-            lane.seen = Some(Seen { count: c.limit, at: now, sent_at });
+            let foreign_now = js_max(0.0, c.limit - counted);
+            let elapsed = js_max(now - first_sent, lane.window_ms / 10.0);
+            let foreign = js_min(lane.cap - 1.0, foreign_now * lane.window_ms / elapsed);
+            lane.seen = Some(Seen { count: c.limit, at: now, sent_at, first_sent });
+            lane.foreign_now = foreign_now;
             if foreign != lane.foreign {
                 lane.foreign = foreign;
                 lane.interval = lane.window_ms / js_max(1.0, lane.cap - foreign);
@@ -224,10 +263,15 @@ impl Pacer {
         let mut out = Vec::new();
         for lane in &self.lanes {
             let ours = self.in_window(lane.window_ms, now) as f64;
-            let fresh = lane.seen.filter(|s| now < s.at + lane.window_ms);
-            let (used, foreign) = match fresh {
-                Some(s) => (js_max(ours, self.riot_estimate(&s)), lane.foreign),
-                None => (ours, 0.0),
+            let fresh = lane.seen.filter(|s| now < s.ends_by(lane.window_ms));
+            // With a fresh count: Riot's bucket (every app) and our requests in it; else our own sliding window.
+            let (used, ours, foreign) = match fresh {
+                Some(s) => {
+                    let in_bucket = self.starts.iter().filter(|t| **t >= s.first_sent).count() as f64;
+                    let used = self.riot_estimate(&s);
+                    (used, js_min(in_bucket, used), lane.foreign_now)
+                }
+                None => (ours, ours, 0.0),
             };
             out.push(WindowUsage { limit: lane.limit, window_ms: lane.window_ms, used, ours, foreign });
         }
@@ -237,8 +281,9 @@ impl Pacer {
     /// Another app's share stops slowing us once the window it was seen in has surely ended.
     fn forget_stale(&mut self, now: f64) {
         for lane in &mut self.lanes {
-            if lane.foreign > 0.0 && lane.seen.map(|s| now >= s.at + lane.window_ms).unwrap_or(true) {
+            if lane.foreign > 0.0 && lane.seen.map(|s| now >= s.ends_by(lane.window_ms)).unwrap_or(true) {
                 lane.foreign = 0.0;
+                lane.foreign_now = 0.0;
                 lane.interval = lane.window_ms / lane.cap;
             }
         }

@@ -458,3 +458,151 @@ fn ids(r: Option<Value>) -> Vec<String> {
 fn _host(p: Option<&str>) -> &'static str {
     account_host(p)
 }
+
+#[cfg(test)]
+mod tests {
+    //! The client against a simulated Riot (testkit::SimRiot) on tokio's paused clock.
+    use super::*;
+    use crate::config::parse_limits;
+    use crate::testkit::SimRiot;
+
+    const KEY: &str = "RGAPI-00000000-test";
+    const EUROPE: &str = "europe.api.riotgames.com";
+    const PACING: PacingOptions = PacingOptions { safety: 0.9, burst: 3.0, concurrency: 3, slowdown: 0.8, recovery_ms: 60_000.0 };
+
+    fn clock() -> Clock {
+        let start = tokio::time::Instant::now();
+        Arc::new(move || (tokio::time::Instant::now() - start).as_secs_f64() * 1000.0)
+    }
+
+    fn sim(clock: &Clock) -> SimRiot {
+        SimRiot::new(clock.clone(), "20:1,100:120", KEY, Box::new(|_, path| Some(json!({ "path": path }))))
+    }
+
+    fn client(sim: SimRiot, clock: Clock, key: &str) -> Arc<RiotClient<SimRiot>> {
+        Arc::new(RiotClient::with_transport(key, parse_limits(Some("20:1,100:120")), PACING, sim, clock))
+    }
+
+    /// Three tasks asking for matches as fast as the client lets them, for `ms`.
+    async fn hammer(c: &Arc<RiotClient<SimRiot>>, clock: &Clock, ms: f64) {
+        let mut tasks = vec![];
+        for _ in 0..3 {
+            let (c, clock) = (c.clone(), clock.clone());
+            tasks.push(tokio::spawn(async move {
+                let s = Signal::new();
+                while clock() < ms {
+                    c.get_match("EUW1", "EUW1_1", &s).await.unwrap();
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn alone_on_the_key_we_use_most_of_the_budget() {
+        let clock = clock();
+        let c = client(sim(&clock), clock.clone(), KEY);
+        hammer(&c, &clock, 600_000.0).await;
+        let calls = c.transport().calls();
+        assert!(calls.iter().all(|x| x.status == 200));
+        assert!(calls.len() >= 440, "{} requests in 10 minutes", calls.len());
+        eprintln!("alone: {} requests in 10 min, peak bucket {}", calls.len(), c.transport().peak(EUROPE));
+        assert!(c.transport().peak(EUROPE) <= 100);
+        let b = c.budget_statuses();
+        assert_eq!(b.len(), 1);
+        assert_eq!((b[0].scope.as_str(), b[0].limit, b[0].window_s, b[0].shared), ("EUROPE", 100, 120, false));
+        assert_eq!(b[0].limits, "20:1,100:120");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn another_app_on_the_same_key_slows_us_down_and_nothing_goes_over() {
+        let clock = clock();
+        let s = sim(&clock);
+        // Irelia Companion: 40 requests every 2 minutes on the same routing value, for 10 minutes.
+        s.add_foreign(EUROPE, 3000, 0, 600_000);
+        let c = client(s, clock.clone(), KEY);
+        hammer(&c, &clock, 600_000.0).await;
+        let calls = c.transport().calls();
+        let ours = calls.len();
+        assert_eq!(calls.iter().filter(|x| x.status == 429).count(), 0, "we never tipped the key over");
+        assert_eq!(c.transport().foreign().1, 0, "nor made the other app hit the limit");
+        assert!(c.transport().peak(EUROPE) <= 100);
+        // About (92 - 40) per 2 minutes is left for us.
+        assert!((180..=330).contains(&ours), "{ours} requests in 10 minutes");
+        let b = &c.budget_statuses()[0];
+        assert!(b.shared, "{b:?}");
+        assert!(b.used > b.ours, "{b:?}");
+        // The other app stops: we speed up again.
+        let before = c.transport().calls().len();
+        hammer(&c, &clock, 900_000.0).await;
+        let after = c.transport().calls().len() - before;
+        assert!(after >= 190, "{after} requests in the 5 minutes after");
+        assert!(!c.budget_statuses()[0].shared);
+        eprintln!("shared key: {ours} requests in 10 min beside the other app's {}; {after} in the 5 min after it stopped", c.transport().foreign().0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_by_the_other_app_blocks_us_until_its_window_ends() {
+        let clock = clock();
+        let s = sim(&clock);
+        // 95 requests in the first 10 s.
+        s.add_foreign(EUROPE, 105, 0, 9_990);
+        let c = client(s, clock.clone(), KEY);
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let sig = Signal::new();
+        c.get_match("EUW1", "EUW1_1", &sig).await.unwrap();
+        let t = clock();
+        c.get_match("EUW1", "EUW1_1", &sig).await.unwrap();
+        let calls = c.transport().calls();
+        assert!(calls.iter().all(|x| x.status == 200), "{calls:?}");
+        assert!(calls[1].at as f64 >= t + 100_000.0, "waited for the window: {} → {}", t, calls[1].at);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn application_429_follows_retry_after() {
+        let clock = clock();
+        let s = sim(&clock);
+        s.script(429, &[("x-rate-limit-type", "application"), ("retry-after", "7")]);
+        let c = client(s, clock.clone(), KEY);
+        let r = c.get_match("EUW1", "EUW1_1", &Signal::new()).await.unwrap();
+        assert!(r.is_some());
+        let calls = c.transport().calls();
+        assert_eq!(calls.iter().map(|x| x.status).collect::<Vec<_>>(), vec![429, 200]);
+        assert!(calls[1].at - calls[0].at >= 7000, "{calls:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn service_429_without_retry_after_backs_off_exponentially() {
+        let clock = clock();
+        let s = sim(&clock);
+        s.script(429, &[("x-rate-limit-type", "service")]);
+        s.script(429, &[]);
+        let c = client(s, clock.clone(), KEY);
+        c.get_match("EUW1", "EUW1_1", &Signal::new()).await.unwrap();
+        let calls = c.transport().calls();
+        assert_eq!(calls.iter().map(|x| x.status).collect::<Vec<_>>(), vec![429, 429, 200]);
+        assert!(calls[1].at - calls[0].at >= 1000);
+        assert!(calls[2].at - calls[1].at >= 2000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn errors_never_carry_the_key() {
+        let clock = clock();
+        let other = "RGAPI-11111111-test";
+        let c = client(sim(&clock), clock.clone(), other);
+        let e = c.get_match("EUW1", "EUW1_1", &Signal::new()).await.unwrap_err();
+        assert!(e.downcast_ref::<RiotAuthError>().is_some());
+        assert!(!format!("{e:?}").contains("11111111"), "{e:?}");
+        let s = sim(&clock);
+        for _ in 0..5 {
+            s.script(500, &[]);
+        }
+        let c = client(s, clock.clone(), KEY);
+        let e = c.get_match("EUW1", "EUW1_1", &Signal::new()).await.unwrap_err();
+        assert!(!format!("{e:?}").contains("00000000"), "{e:?}");
+        assert_eq!(budget_scope("eun1.api.riotgames.com"), "eun1");
+        assert_eq!(budget_scope("asia.api.riotgames.com"), "ASIA");
+    }
+}

@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Irelia Companion",
-  "version": "2.2.0",
-  "identifier": "com.ireliacompanion.app",
-  "mainBinaryName": "IreliaCompanion",
+  "productName": "Build Fetcher",
+  "version": "1.0.0",
+  "identifier": "com.buildfetcher.app",
+  "mainBinaryName": "BuildFetcher",
   "build": {
     "frontendDist": "splash"
   },
@@ -17,22 +17,20 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "publisher": "Irelia Companion",
-    "copyright": "Not affiliated with Riot Games.",
+    "publisher": "Build Fetcher",
+    "copyright": "Build Fetcher isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties.",
     "category": "Utility",
-    "shortDescription": "Irelia Companion",
-    "longDescription": "Builds, drafts and an in-game overlay for League of Legends, from games fetched with your own Riot API key.",
+    "shortDescription": "Build Fetcher",
+    "longDescription": "League of Legends builds for any champion and role, learned on this PC from games fetched with your own Riot API key.",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.ico"],
     "resources": {
-      "../../dist": "dist",
-      "../../scrape.config.json": "scrape.config.json"
+      "../../dist": "dist"
     },
     "windows": {
       "nsis": {
         "installMode": "currentUser",
         "displayLanguageSelector": false,
-        "installerIcon": "icons/icon.ico",
-        "installerHooks": "windows/hooks.nsh"
+        "installerIcon": "icons/icon.ico"
       }
     }
   }

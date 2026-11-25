@@ -318,3 +318,42 @@ async fn a_rejected_key_stops_fetching_until_a_new_key_is_set() {
         h.await.unwrap();
     }
 }
+
+/// Fetching → Pause: no request until Resume, whatever the activity; the choice comes from the settings, so a fetcher
+/// started with `fetching: false` (after a restart) stays paused.
+#[tokio::test(start_paused = true)]
+async fn the_user_pauses_and_resumes_fetching() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = store(dir.path());
+    let games = synth(120);
+    let me = puuids(&games[0])[3].clone();
+    let fake = fake_world(&games);
+    let cfg = FetcherConfig { idle_ms: 5_000, ..Default::default() };
+    let paused = Settings { fetching: false, ..settings(Some(&me)) };
+    let f = Fetcher::with_clock(fake.clone(), st.clone(), paused.clone(), cfg, clock());
+    let (_tx, rx) = watch::channel(Activity::Idle);
+    let handles = f.spawn(rx);
+    tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+    assert_eq!(fake.calls.lock().len(), 0, "paused from the start");
+    assert_eq!(f.status().paused.as_deref(), Some("paused by you"));
+    assert!(!f.status().running);
+
+    // Resume: requests start.
+    f.update_settings(Settings { fetching: true, ..paused.clone() });
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let n = fake.calls.lock().len();
+    assert!(n > 0, "resumed");
+    assert_eq!(f.status().paused, None);
+
+    // Pause again: nothing more is asked.
+    f.update_settings(paused);
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let m = fake.calls.lock().len();
+    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    assert_eq!(fake.calls.lock().len(), m, "no request while paused by the user");
+    assert_eq!(f.status().paused.as_deref(), Some("paused by you"));
+    f.stop();
+    for h in handles {
+        h.await.unwrap();
+    }
+}

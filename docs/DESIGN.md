@@ -391,3 +391,17 @@ agreement, and write each change in the hand-over section of this file.
     - routes `POST /api/backup/export`, `POST /api/backup/import`, `GET /api/backup/pending`, `POST /api/backup/cancel`;
     - `StoreHandle::{export_backup, stage_import, pending_import, cancel_import}`;
     - desktop bridge `backup.pickSave`, `backup.pickOpen` and `restart` (native dialogs, origin-checked).
+- (lead, 2026-11-25, 1.1.0) **The learner waits for enough data; Pause and Resume for fetching and learning.**
+  - **Waiting.** `Budget` gains `first_min_records` (2,000), `min_records` (500), `max_wait` (6 h) and
+    `min_validation` (100), set in `wire_learn.rs`.
+    - With fewer new records than the minimum, `train_step` returns `Outcome::Waiting` and saves nothing, so the
+      records stay unread.
+    - The reason it waits is the first line of the model status.
+    - Before this, an idle PC trained on whatever had arrived in the last seconds; those tiny updates were rejected
+      and their records still marked as read, so a first model could take very long or never arrive.
+    - `Budget::records()` has no minimums (tests and measurements).
+  - **Pause and Resume.**
+    - Store setting `fetching` (default true): `Fetcher::set_user_paused` cancels requests in flight. Status reads
+      "paused by you".
+    - `LearnerHandle::set_learning` interrupts an update in progress.
+    - Buttons on the Fetching and Model pages, and toggles in Settings.

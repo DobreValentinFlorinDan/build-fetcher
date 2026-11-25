@@ -142,6 +142,7 @@ pub struct FakeLearner {
     pub checkpoints: Mutex<Vec<CheckpointInfo>>,
     pub log: Mutex<Vec<String>>,
     pub activity: Mutex<Vec<Activity>>,
+    pub learning: Mutex<bool>,
 }
 
 impl Default for FakeLearner {
@@ -158,13 +159,14 @@ impl Default for FakeLearner {
             checkpoints: Mutex::new(vec![cp("v3", "logistic", 0.6702, true), cp("v2", "logistic", 0.6719, false), cp("v1", "logistic", 0.6788, false)]),
             log: Mutex::new(vec!["v4 rejected: log loss 0.6712 > 0.6702".into(), "v3 accepted: log loss 0.6719 → 0.6702".into()]),
             activity: Mutex::new(vec![]),
+            learning: Mutex::new(true),
         }
     }
 }
 
 impl LearnerHandle for FakeLearner {
     fn status(&self) -> ModelStatus {
-        ModelStatus { learning: true, backend: "cpu".into(), checkpoints: self.checkpoints.lock().clone(), log: self.log.lock().clone() }
+        ModelStatus { learning: *self.learning.lock(), backend: "cpu".into(), checkpoints: self.checkpoints.lock().clone(), log: self.log.lock().clone() }
     }
     fn rollback(&self, version: &str) -> anyhow::Result<ModelStatus> {
         {
@@ -181,6 +183,9 @@ impl LearnerHandle for FakeLearner {
     }
     fn set_activity(&self, activity: Activity) {
         self.activity.lock().push(activity);
+    }
+    fn set_learning(&self, on: bool) {
+        *self.learning.lock() = on;
     }
 }
 

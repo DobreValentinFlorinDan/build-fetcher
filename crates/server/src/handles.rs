@@ -24,6 +24,8 @@ pub struct AppSettings {
     pub tier_a_detected: Vec<i64>,
     pub gpu: bool,
     pub learning: bool,
+    /// Fetching on, or paused by the user (Fetching → Pause / Resume). Kept across restarts.
+    pub fetching: bool,
     /// The first-run steps (key, region) were completed: fetching may start.
     pub first_run_complete: bool,
 }
@@ -38,6 +40,7 @@ impl Default for AppSettings {
             tier_a_detected: vec![],
             gpu: false,
             learning: true,
+            fetching: true,
             first_run_complete: false,
         }
     }
@@ -61,6 +64,8 @@ pub struct SettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learning: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetching: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_run_complete: Option<bool>,
 }
 
@@ -83,6 +88,9 @@ impl SettingsPatch {
         }
         if let Some(v) = self.learning {
             s.learning = v;
+        }
+        if let Some(v) = self.fetching {
+            s.fetching = v;
         }
         if let Some(v) = self.first_run_complete {
             s.first_run_complete = v;
@@ -133,6 +141,8 @@ pub trait LearnerHandle: Send + Sync {
     fn rollback(&self, version: &str) -> anyhow::Result<ModelStatus>;
     /// Heavy work runs only when Idle.
     fn set_activity(&self, activity: Activity);
+    /// Learning on or off (Model → Pause / Resume, Settings): off stops an update at its next mini-batch.
+    fn set_learning(&self, on: bool);
 }
 
 /// Whether Irelia Companion's key can be offered ("Use the same key as Irelia Companion"). Never the key itself.

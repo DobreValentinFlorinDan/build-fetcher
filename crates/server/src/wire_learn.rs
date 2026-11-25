@@ -22,6 +22,14 @@ use std::time::Duration;
 
 /// Records per update: the learner's own advice is about 2,000 for a first update to beat the baseline.
 const RECORDS_PER_STEP: usize = 2_000;
+/// The first update waits for this many new games (on synthetic data, 500 were rejected several times).
+const FIRST_MIN_RECORDS: usize = 2_000;
+/// Later updates wait for this many, so each one has enough evidence to beat the model in force...
+const MIN_RECORDS: usize = 500;
+/// ...or go ahead with fewer after this long (slow fetching: a shared key, few regions).
+const MAX_WAIT: Duration = Duration::from_secs(6 * 3600);
+/// Held-out matches the guardrail needs before it can judge an update (the store keeps 1 timeline game in 10).
+const MIN_VALIDATION: usize = 100;
 /// One step may take this long before it stops between mini-batches (it is resumed at the next idle moment).
 const STEP_DEADLINE: Duration = Duration::from_secs(120);
 /// How often the cycle looks again when there is nothing to do or the user is busy.
@@ -93,7 +101,15 @@ impl RealLearner {
                 continue;
             }
             let act = self.activity.clone();
-            let budget = Budget { max_records: RECORDS_PER_STEP, deadline: Some(STEP_DEADLINE), activity: Arc::new(move || activity_of(act.load(Ordering::SeqCst))) };
+            let budget = Budget {
+                max_records: RECORDS_PER_STEP,
+                deadline: Some(STEP_DEADLINE),
+                activity: Arc::new(move || activity_of(act.load(Ordering::SeqCst))),
+                min_records: MIN_RECORDS,
+                first_min_records: FIRST_MIN_RECORDS,
+                max_wait: Some(MAX_WAIT),
+                min_validation: MIN_VALIDATION,
+            };
             let report = match learner.train_step(&*db, &budget) {
                 Ok(r) => r,
                 Err(e) => {
@@ -102,8 +118,9 @@ impl RealLearner {
                     continue;
                 }
             };
-            // Nothing to learn (no new records, learning off, not idle): wait without a log line every poll.
-            if matches!(report.outcome, Outcome::NoData | Outcome::NotIdle | Outcome::Disabled) {
+            // Nothing to learn yet (no or too few new records, learning off, not idle): wait without a log line every poll.
+            // The dashboard's model status says what the learner waits for.
+            if matches!(report.outcome, Outcome::NoData | Outcome::Waiting | Outcome::NotIdle | Outcome::Disabled) {
                 std::thread::sleep(IDLE_POLL);
                 continue;
             }
@@ -141,7 +158,7 @@ impl RealLearner {
                         Err(e) => crate::bf_log!("[cleanup] failed: {}", crate::routes::scrub(&e.to_string())),
                     }
                 }
-                Outcome::NoData | Outcome::NotIdle | Outcome::Disabled => std::thread::sleep(IDLE_POLL),
+                Outcome::NoData | Outcome::Waiting | Outcome::NotIdle | Outcome::Disabled => std::thread::sleep(IDLE_POLL),
                 Outcome::Interrupted => std::thread::sleep(Duration::from_secs(5)),
             }
         }
@@ -161,6 +178,17 @@ impl LearnerHandle for RealLearner {
         l.rollback(version)?;
         crate::bf_log!("[learn] rolled back to {version}");
         Ok(l.status())
+    }
+
+    fn set_learning(&self, on: bool) {
+        if let Some(l) = self.learner.get() {
+            l.set_learning(on);
+            if !on {
+                // Stop an update in progress at its next mini-batch; nothing it did so far is kept.
+                l.interrupt();
+            }
+        }
+        crate::bf_log!("[learn] learning {}", if on { "resumed" } else { "paused" });
     }
 
     fn set_activity(&self, activity: Activity) {

@@ -4,7 +4,7 @@ import { api, useGet } from './api.ts';
 import { BudgetMeter, BuildView, Card, ChampionIcon, ChampionPicker, ErrorText, RolePicker } from './components.tsx';
 import { useDd } from './ddragon.ts';
 import { ago, bytes, count, dataAge, ROLE_NAMES } from './format.ts';
-import type { BuildRecommendation, DraftState, ImportResult, ModelStatus, PairVolume, Role, StorageStatus, Status } from './types.ts';
+import type { BuildRecommendation, DraftState, ImportResult, ModelStatus, PairVolume, Role, SettingsView, StorageStatus, Status } from './types.ts';
 
 // ---------------------------------------------------------------- import into the client
 
@@ -153,15 +153,44 @@ export function ChampSelectPage({ draft, status }: { draft: DraftState | null; s
 
 // ---------------------------------------------------------------- Fetching
 
+/**
+ * Start / stop for fetching or learning. It saves the setting (kept across restarts); the server applies it at once:
+ * a paused fetcher cancels its requests in flight, a paused learner stops its update at the next mini-batch.
+ */
+export function SwitchButton({ field, on, onChange }: { field: 'fetching' | 'learning'; on: boolean; onChange: (on: boolean) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const flip = async () => {
+    setBusy(true);
+    try {
+      const v = await api.patch<SettingsView>('/api/settings', { [field]: !on });
+      onChange(v.settings[field]);
+      setError(null);
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+  const what = field === 'fetching' ? 'fetching' : 'learning';
+  return (
+    <span className="inline-flex items-center gap-2">
+      <button disabled={busy} onClick={flip} className={`rounded-md px-3 py-1 text-sm font-semibold disabled:opacity-40 ${on ? 'border border-line text-fg' : 'bg-accent text-bg'}`}>
+        {on ? `Pause ${what}` : `Resume ${what}`}
+      </button>
+      {error && <span className="text-xs text-bad">{error}</span>}
+    </span>
+  );
+}
+
 export function FetchingPage({ status }: { status: Status | null }) {
   const dd = useDd();
+  const settings = useGet<SettingsView>('/api/settings');
+  const [fetching, setFetching] = useState<boolean | null>(null);
+  useEffect(() => { if (settings.data) setFetching(settings.data.settings.fetching); }, [settings.data]);
   const volumes = useGet<PairVolume[]>('/api/data-age', 60_000);
   const storage = useGet<StorageStatus>('/api/storage', 60_000);
   const f = status?.fetch;
   const now = Date.now();
   return (
     <div className="grid gap-4 lg:grid-cols-2">
-      <Card title="Fetching" right={f && <span className={`text-xs ${f.running ? 'text-good' : 'text-warn'}`}>{f.running ? 'running' : `paused${f.paused ? `: ${f.paused}` : ''}`}</span>}>
+      <Card title="Fetching" right={<span className="inline-flex items-center gap-3">{f && <span className={`text-xs ${f.running ? 'text-good' : 'text-warn'}`}>{f.running ? 'running' : `paused${f.paused ? `: ${f.paused}` : ''}`}</span>}{fetching !== null && <SwitchButton field="fetching" on={fetching} onChange={setFetching} />}</span>}>
         {!f ? <p className="text-sm text-muted">Connecting…</p> : (
           <div className="space-y-4">
             <div className="grid grid-cols-3 gap-3 text-center">
@@ -265,7 +294,7 @@ export function ModelPage() {
   if (!model) return m.error ? <ErrorText>{m.error}</ErrorText> : <p className="text-sm text-muted">Loading…</p>;
   return (
     <div className="space-y-4">
-      <Card title="Model" right={<span className="text-xs text-muted">{model.learning ? 'learning on' : 'learning off'} · {model.backend}</span>}>
+      <Card title="Model" right={<span className="inline-flex items-center gap-3"><span className="text-xs text-muted">{model.learning ? 'learning on' : 'learning off'} · {model.backend}</span><SwitchButton field="learning" on={model.learning} onChange={(learning) => setModel({ ...model, learning })} /></span>}>
         <p className="mb-3 text-xs text-muted">Each update is checked on held-out games; one that does worse on any metric is rejected and the previous checkpoint stays.</p>
         {model.checkpoints.length === 0 ? <p className="text-sm text-muted">No checkpoint yet: builds come from counts until the first model is trained.</p> : <RollbackButtons model={model} onDone={setModel} />}
       </Card>

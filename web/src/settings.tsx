@@ -140,6 +140,7 @@ export function SettingsPage() {
       </Card>
       <Card title="Learning">
         <div className="space-y-3">
+          <Toggle on={s.fetching} onChange={(fetching) => patch({ fetching })} label="Fetch new games" hint="Off pauses fetching until you turn it on again, also after a restart. It pauses on its own in champ select and in game." />
           <Toggle on={s.learning} onChange={(learning) => patch({ learning })} label="Learn from new games" hint="Runs only while the PC is idle and League isn't open in a game or champ select." />
           <Toggle on={s.gpu} onChange={(gpu) => patch({ gpu })} label="Use the GPU when available" hint="NVIDIA only, off by default. Checked against the CPU; any mismatch falls back to the CPU. Takes effect when Build Fetcher restarts." />
         </div>

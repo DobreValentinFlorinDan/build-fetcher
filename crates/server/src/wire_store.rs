@@ -157,6 +157,7 @@ impl RealStore {
             tier_a_detected: detected,
             gpu: s.gpu,
             learning: s.learning,
+            fetching: s.fetching,
             first_run_complete: self.first_run_complete(),
         }
     }
@@ -175,7 +176,9 @@ impl StoreHandle for RealStore {
         if let Some(f) = self.fetcher.lock().as_ref() {
             return f.status();
         }
-        let paused = if self.store().is_none() {
+        let paused = if !self.load_settings().fetching {
+            "paused by you"
+        } else if self.store().is_none() {
             "opening the database"
         } else if !self.key_present() {
             "no API key"
@@ -227,6 +230,10 @@ impl StoreHandle for RealStore {
         }
         if let Some(v) = patch.learning {
             s.learning = v;
+        }
+        if let Some(v) = patch.fetching {
+            s.fetching = v;
+            crate::bf_log!("[fetch] {}", if v { "resumed by you" } else { "paused by you" });
         }
         self.save(&s)?;
         if let Some(done) = patch.first_run_complete {

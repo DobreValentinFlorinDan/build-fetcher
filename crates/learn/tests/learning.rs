@@ -458,3 +458,55 @@ fn checkpoints_report_metrics_and_the_backend() {
     }
     assert!(t.learner.disk_bytes() > 0);
 }
+
+// ------------------------------------------------------------------------------------------------ waiting for data
+
+/// The app's budget: the first update waits for 1,500 new games here (2,000 in the app), later ones for 500, with a
+/// held-out sample of at least 100 matches.
+fn waiting_budget(max_wait: Option<std::time::Duration>) -> Budget {
+    Budget { min_records: 500, first_min_records: 1500, max_wait, min_validation: 100, ..Budget::records(2000) }
+}
+
+#[test]
+fn updates_wait_for_enough_games_and_read_nothing_meanwhile() {
+    let dir = tempfile::tempdir().unwrap();
+    // 1,000 games so far: the first update waits, and reads nothing.
+    let mut src = source(1000, 1);
+    let l = Learner::open(dir.path(), data(), quick()).unwrap();
+    let r = l.train_step(&src, &waiting_budget(None)).unwrap();
+    assert_eq!(r.outcome, Outcome::Waiting);
+    let st = l.status();
+    assert!(st.checkpoints.is_empty());
+    assert_eq!(st.log.first().map(String::as_str), Some("Waiting for 1500 new games before the first update (1000 so far)."), "{:?}", st.log);
+    // Waiting again changes nothing either (many polls while fetching trickles in).
+    assert_eq!(l.train_step(&src, &waiting_budget(None)).unwrap().outcome, Outcome::Waiting);
+
+    // 500 more arrive: the first update reads all 1,500, none lost to the waits.
+    src.append(generate(&data(), &SyntheticConfig { matches: 500, validation: 0, seed: 2, ..Default::default() }), &data());
+    let r = l.train_step(&src, &waiting_budget(None)).unwrap();
+    assert_eq!(r.records, 1500);
+    assert_eq!(r.outcome, Outcome::Accepted, "{:#?}", r.log);
+    assert!(!l.status().log.first().unwrap().starts_with("Waiting"), "the waiting line goes once an update ran");
+
+    // A trickle of 200 after it: the next update waits for 500...
+    src.append(generate(&data(), &SyntheticConfig { matches: 200, validation: 0, seed: 3, ..Default::default() }), &data());
+    assert_eq!(l.train_step(&src, &waiting_budget(Some(std::time::Duration::from_secs(3600)))).unwrap().outcome, Outcome::Waiting);
+    assert!(l.status().log[0].contains("before the next update (200 so far)"), "{:?}", l.status().log);
+    // ...unless the last update is older than max_wait: then the 200 go in.
+    let r = l.train_step(&src, &waiting_budget(Some(std::time::Duration::ZERO))).unwrap();
+    assert_eq!(r.records, 200);
+    assert!(matches!(r.outcome, Outcome::Accepted | Outcome::Rejected), "{:?}", r.outcome);
+}
+
+#[test]
+fn updates_wait_for_a_validation_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    // Plenty of games, but only 50 held out: the guardrail couldn't judge, so nothing is read.
+    let src = generate(&data(), &SyntheticConfig { matches: 2000, validation: 50, seed: 4, ..Default::default() });
+    let l = Learner::open(dir.path(), data(), quick()).unwrap();
+    let r = l.train_step(&src, &waiting_budget(None)).unwrap();
+    assert_eq!(r.outcome, Outcome::Waiting);
+    assert!(l.status().log[0].starts_with("Waiting for 100 held-out games"), "{:?}", l.status().log);
+    // With no minimums (tests, measurements) the same data train at once.
+    assert_ne!(l.train_step(&src, &Budget::records(2000)).unwrap().outcome, Outcome::Waiting);
+}

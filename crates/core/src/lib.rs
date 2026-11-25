@@ -18,6 +18,7 @@ pub mod riot;
 pub mod sys;
 pub mod testkit;
 pub mod util;
+pub mod zip;
 
 /// Every program built on this crate allocates with mimalloc (many small allocations in ingestion and training; it
 /// only changes where memory comes from, never a result).

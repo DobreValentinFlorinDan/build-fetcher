@@ -258,6 +258,36 @@ impl StoreHandle for RealStore {
     fn game_ended(&self) {
         // The fetcher sees the InGame → Idle change on its activity watch and fetches the user's new game first.
     }
+
+    fn export_backup(&self, path: &Path, include_key: bool) -> anyhow::Result<bf_store::backup::ExportReport> {
+        let store = self.store().ok_or_else(|| anyhow::anyhow!("The database is still opening; try again in a moment."))?;
+        let r = bf_store::backup::export(&store, &self.settings_file, &self.data_dir.join("checkpoints"), path, include_key)?;
+        crate::bf_log!("[backup] exported {} ({:.1} MB, {} files, key {}) in {} ms", r.path.display(), r.bytes as f64 / 1e6, r.files, if r.includes_key { "included" } else { "left out" }, r.millis);
+        Ok(r)
+    }
+
+    fn stage_import(&self, path: &Path) -> anyhow::Result<bf_store::backup::ImportSummary> {
+        let r = bf_store::backup::stage_import(path, &self.config_dir())?;
+        crate::bf_log!("[backup] import staged from {} (made by {}, {:.1} MB database); it applies at the next start", path.display(), r.version, r.database_bytes as f64 / 1e6);
+        Ok(r)
+    }
+
+    fn pending_import(&self) -> Option<bf_store::backup::ImportSummary> {
+        bf_store::backup::pending_import(&self.config_dir())
+    }
+
+    fn cancel_import(&self) -> anyhow::Result<()> {
+        bf_store::backup::cancel_import(&self.config_dir())?;
+        crate::bf_log!("[backup] staged import cancelled");
+        Ok(())
+    }
+}
+
+impl RealStore {
+    /// The settings folder (settings.json, logs, a staged import).
+    fn config_dir(&self) -> PathBuf {
+        self.settings_file.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+    }
 }
 
 /// The key, over `bf_store`'s settings and the Irelia Companion import.

@@ -97,6 +97,11 @@ export type StorageStatus = {
   lastCleanupFreedBytes: number | null;
 };
 
+/** POST /api/backup/export. */
+export type ExportReport = { path: string; bytes: number; includesKey: boolean; files: number; millis: number };
+/** A backup staged for import (POST /api/backup/import, GET /api/backup/pending). */
+export type ImportSummary = { version: string; createdMs: number; includesKey: boolean; databaseBytes: number; checkpointFiles: number };
+
 export type Metrics = { games: number; logLoss: number; brier: number; calibration: number[] };
 export type CheckpointInfo = { version: string; kind: string; createdMs: number; metrics: Metrics; recordsSeen: number; active: boolean };
 export type ModelStatus = { learning: boolean; backend: string; checkpoints: CheckpointInfo[]; log: string[] };

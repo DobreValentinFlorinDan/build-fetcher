@@ -5,7 +5,7 @@ import { api, useGet } from './api.ts';
 import { Card, ChampionIcon, ChampionPicker, ErrorText, Toggle } from './components.tsx';
 import { useDd } from './ddragon.ts';
 import { bytes, gb, looksLikeKey } from './format.ts';
-import { PLATFORMS, type ModelStatus, type AppSettings, type KeyView, type Platform, type SettingsView, type StorageStatus } from './types.ts';
+import { PLATFORMS, type ModelStatus, type AppSettings, type ExportReport, type ImportSummary, type KeyView, type Platform, type SettingsView, type StorageStatus } from './types.ts';
 import { RollbackButtons, StorageCard } from './pages.tsx';
 import { desktop, type DesktopSettings } from './desktop.ts';
 
@@ -120,6 +120,7 @@ export function SettingsPage() {
         <p className="mt-1 text-xs text-muted">Over the budget, the oldest patches' games are trimmed; counts and the model stay.</p>
       </Card>
       {storage.data && <StorageCard s={storage.data} />}
+      <BackupCard />
       <Card title="Tier A champions">
         <p className="mb-2 text-xs text-muted">Tier A champions get full games with timelines and the learned model. Your most played are added on their own.</p>
         <ul className="mb-3 flex flex-wrap gap-2">
@@ -207,5 +208,84 @@ export function FirstRun({ onDone }: { onDone: () => void }) {
         </Card>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- Storage → Export / Import
+
+/** build-fetcher-backup-2026-11-25.zip */
+function backupName(): string {
+  return `build-fetcher-backup-${new Date().toISOString().slice(0, 10)}.zip`;
+}
+
+/**
+ * Export everything learned to one zip, or import one from another PC. An import is checked, then staged: it replaces
+ * this PC's data at the next start (the replaced data is kept aside in before-import until the next import).
+ */
+function BackupCard() {
+  const pending = useGet<ImportSummary | null>('/api/backup/pending');
+  const [staged, setStaged] = useState<ImportSummary | null>(null);
+  const [includeKey, setIncludeKey] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => { setStaged(pending.data ?? null); }, [pending.data]);
+
+  const exportNow = async () => {
+    setError(null); setDone(null);
+    // In the app: the save dialog. In a plain browser (development): the server's Downloads folder.
+    let path: string | null | undefined;
+    if (desktop?.backup) {
+      path = await desktop.backup.pickSave(backupName());
+      if (!path) return;
+    }
+    setBusy(true);
+    try {
+      const r = await api.post<ExportReport>('/api/backup/export', { path, includeKey });
+      setDone(`Saved ${bytes(r.bytes)} to ${r.path}${r.includesKey ? ' (with your API key: keep the file private)' : ''}.`);
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  const importNow = async () => {
+    setError(null); setDone(null);
+    const path = desktop?.backup ? await desktop.backup.pickOpen() : prompt('Full path of the backup .zip to import:');
+    if (!path) return;
+    if (!confirm('Importing replaces this PC\'s games, counts, model and settings when Build Fetcher next starts. The current data is kept aside (in before-import) until the next import. Continue?')) return;
+    setBusy(true);
+    try { setStaged(await api.post<ImportSummary>('/api/backup/import', { path })); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  const cancel = async () => {
+    try { await api.post('/api/backup/cancel'); setStaged(null); } catch (e) { setError((e as Error).message); }
+  };
+
+  return (
+    <Card title="Export and import">
+      <p className="mb-3 text-xs text-muted">One zip with your settings, games, counts and model, to move Build Fetcher to another PC or keep a copy. Data Dragon and logs are left out.</p>
+      <div className="space-y-3">
+        <Toggle on={includeKey} onChange={setIncludeKey} label="Include my Riot API key" hint="Off: the other PC keeps its own key, or asks for one. On: anyone with the file can use your key." />
+        <div className="flex flex-wrap gap-2">
+          <button disabled={busy} onClick={exportNow} className="rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-bg disabled:opacity-40">Export…</button>
+          <button disabled={busy} onClick={importNow} className="rounded-md border border-line px-3 py-1.5 text-sm text-fg disabled:opacity-40">Import…</button>
+        </div>
+        {busy && <p className="text-xs text-muted">Working… (a large database can take a minute)</p>}
+        {done && <p className="text-sm text-good">{done}</p>}
+        {staged && (
+          <div className="rounded-md border border-accent/40 bg-accent/10 p-3 text-sm">
+            <p>
+              Ready to import a backup made by Build Fetcher {staged.version}
+              {staged.createdMs > 0 && ` on ${new Date(staged.createdMs).toLocaleString()}`}: {bytes(staged.databaseBytes)} of data, {staged.checkpointFiles} model files
+              {staged.includesKey ? ', with an API key' : ', without an API key (this PC keeps its own)'}.
+            </p>
+            <p className="mt-1 text-xs text-muted">It takes effect when Build Fetcher restarts.</p>
+            <div className="mt-2 flex gap-2">
+              {desktop?.restart && <button onClick={() => desktop?.restart()} className="rounded-md bg-accent px-3 py-1 text-sm font-semibold text-bg">Restart now</button>}
+              <button onClick={cancel} className="rounded-md border border-line px-3 py-1 text-sm">Cancel import</button>
+            </div>
+          </div>
+        )}
+        {error && <ErrorText>{error}</ErrorText>}
+      </div>
+    </Card>
   );
 }

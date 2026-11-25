@@ -460,6 +460,34 @@ async fn open_folder(webview: Webview, shell: State<'_, Arc<Shell>>, path: Strin
     tauri_plugin_opener::open_path(p, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Settings → Storage → Export: where to write the backup (the native save dialog). None when cancelled.
+#[tauri::command]
+async fn backup_pick_save(app: tauri::AppHandle, webview: Webview, shell: State<'_, Arc<Shell>>, name: String) -> Result<Option<String>, String> {
+    trusted(&shell, &webview)?;
+    let name = if name.ends_with(".zip") && !name.contains(['/', '\\']) { name } else { "build-fetcher-backup.zip".into() };
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().add_filter("Build Fetcher backup", &["zip"]).set_file_name(name).blocking_save_file())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(picked.and_then(|f| f.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// Settings → Storage → Import: the backup to read (the native open dialog). None when cancelled.
+#[tauri::command]
+async fn backup_pick_open(app: tauri::AppHandle, webview: Webview, shell: State<'_, Arc<Shell>>) -> Result<Option<String>, String> {
+    trusted(&shell, &webview)?;
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().add_filter("Build Fetcher backup", &["zip"]).blocking_pick_file())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(picked.and_then(|f| f.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// Restarts the app (a staged import is applied at start, before the database opens).
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle, webview: Webview, shell: State<Arc<Shell>>) -> Result<(), String> {
+    trusted(&shell, &webview)?;
+    app.restart()
+}
+
 #[tauri::command]
 fn settings_get(webview: Webview, shell: State<Arc<Shell>>) -> Result<DesktopSettings, String> {
     trusted(&shell, &webview)?;
@@ -585,7 +613,10 @@ fn main() {
             overlay_state,
             overlay_set_visible,
             overlay_set_click_through,
-            overlay_fit_height
+            overlay_fit_height,
+            backup_pick_save,
+            backup_pick_open,
+            restart_app
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

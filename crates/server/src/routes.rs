@@ -77,6 +77,10 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .route("/api/settings", get(settings_get).patch(settings_patch))
         .route("/api/key", post(key_paste))
         .route("/api/key/import-irelia", post(key_import))
+        .route("/api/backup/export", post(backup_export))
+        .route("/api/backup/import", post(backup_import))
+        .route("/api/backup/pending", get(backup_pending))
+        .route("/api/backup/cancel", post(backup_cancel))
         .route("/api/dev/simulate-live", post(simulate_live))
         .route("/api/dev/stop-simulation", post(stop_simulation))
         .route("/api/dev/client-event", post(client_event))
@@ -158,6 +162,61 @@ struct RollbackBody {
 async fn rollback(State(app): State<Arc<App>>, Json(b): Json<RollbackBody>) -> Result<R, ApiError> {
     let r = blocking(move || app.h.learner.rollback(&b.version)).await?.map_err(|e| ApiError::conflict(format!("{e:#}")))?;
     Ok(ok(r))
+}
+
+// ---------------------------------------------------------------- backup
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportBody {
+    /// Where to write the zip (from the desktop app's save dialog); none: Downloads, with a dated name.
+    path: Option<String>,
+    #[serde(default)]
+    include_key: bool,
+}
+
+#[derive(Deserialize)]
+struct BackupImportBody {
+    path: String,
+}
+
+/// The user's Downloads folder (else their home), where an export goes when no path is given.
+fn default_export_path() -> std::path::PathBuf {
+    let home = bf_core::app_config::home_dir();
+    let downloads = home.join("Downloads");
+    (if downloads.is_dir() { downloads } else { home }).join(bf_store::backup::default_file_name())
+}
+
+fn absolute(p: &str) -> Result<std::path::PathBuf, ApiError> {
+    let path = std::path::PathBuf::from(p.trim());
+    if !path.is_absolute() {
+        return Err(ApiError::bad("Give the full path of the file (for example C:\\Users\\you\\Downloads\\backup.zip)."));
+    }
+    Ok(path)
+}
+
+async fn backup_export(State(app): State<Arc<App>>, Json(b): Json<ExportBody>) -> Result<R, ApiError> {
+    let path = match b.path.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(p) => absolute(p)?,
+        None => default_export_path(),
+    };
+    let r = blocking(move || app.h.store.export_backup(&path, b.include_key)).await?.map_err(|e| ApiError::bad(format!("{e:#}")))?;
+    Ok(ok(r))
+}
+
+async fn backup_import(State(app): State<Arc<App>>, Json(b): Json<BackupImportBody>) -> Result<R, ApiError> {
+    let path = absolute(&b.path)?;
+    let r = blocking(move || app.h.store.stage_import(&path)).await?.map_err(|e| ApiError::bad(format!("{e:#}")))?;
+    Ok(ok(r))
+}
+
+async fn backup_pending(State(app): State<Arc<App>>) -> Result<R, ApiError> {
+    Ok(ok(blocking(move || app.h.store.pending_import()).await?))
+}
+
+async fn backup_cancel(State(app): State<Arc<App>>) -> Result<R, ApiError> {
+    blocking(move || app.h.store.cancel_import()).await??;
+    Ok(ok(serde_json::json!({ "cancelled": true })))
 }
 
 // ---------------------------------------------------------------- builds

@@ -414,3 +414,36 @@ async fn simulated_game_drives_the_overlay() {
     assert!(b.contains("\"stopped\":true"));
     assert_eq!(get(&t.app, "/api/live").await, Value::Null);
 }
+
+#[tokio::test]
+async fn backup_routes_export_stage_and_cancel() {
+    let t = harness(KeyOffer::Missing);
+    let dir = tempfile::tempdir().unwrap();
+    let zip = dir.path().join("backup.zip");
+    let path = zip.to_string_lossy().to_string();
+
+    // Export to the chosen file; the answer is the store's report.
+    let (s, b) = call(&t.app, Method::POST, "/api/backup/export", Some(json!({ "path": path, "includeKey": false }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let r: Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(keys_of(&r), vec!["path", "bytes", "includesKey", "files", "millis"]);
+    assert_eq!(r["includesKey"], false);
+    assert!(zip.is_file());
+    // A relative path is refused (the server never guesses a folder from the page's input).
+    let (s, b) = call(&t.app, Method::POST, "/api/backup/export", Some(json!({ "path": "backup.zip" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    assert!(b.contains("full path"));
+
+    // Nothing staged yet; a missing file is refused; the exported one is staged and can be cancelled.
+    assert_eq!(get(&t.app, "/api/backup/pending").await, Value::Null);
+    let (s, b) = call(&t.app, Method::POST, "/api/backup/import", Some(json!({ "path": dir.path().join("none.zip").to_string_lossy() }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    let (s, b) = call(&t.app, Method::POST, "/api/backup/import", Some(json!({ "path": path }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let staged: Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(keys_of(&staged), vec!["version", "createdMs", "includesKey", "databaseBytes", "checkpointFiles"]);
+    assert_eq!(get(&t.app, "/api/backup/pending").await, staged);
+    let (s, _) = call(&t.app, Method::POST, "/api/backup/cancel", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(get(&t.app, "/api/backup/pending").await, Value::Null);
+}

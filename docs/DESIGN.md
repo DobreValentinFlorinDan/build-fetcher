@@ -369,3 +369,25 @@ agreement, and write each change in the hand-over section of this file.
   - **Build tool not used:** compiling the kernel with NVIDIA's NVRTC from PyPI was not done. It is a closed-source
     binary, and the user's rules ask before such tools, so the PTX was written by hand.
   - **The key** is read only from Build Fetcher's settings: no `RIOT_API_KEY` variable, and no `.env` file.
+- (lead, 2026-11-25, after 1.0.0) **Export and import** (Settings → Storage; asked for by the user).
+  - **Contents:** `crates/store/src/backup.rs` writes one zip:
+    - `manifest.json`;
+    - `settings.json` (no key unless asked; no `dataDir`);
+    - `data/build-fetcher.db`: a `VACUUM INTO` snapshot taken on the store's reading connection, so fetching goes on;
+    - `data/checkpoints/*`, without `.tmp` files.
+  - **Zip handling:** irelia-companion's zip module (ZIP64, CRC-checked) is back in `bf_core::zip`.
+  - **Import is staged, not applied live.** It is checked and unpacked into `<settings folder>/import-pending/`. It is
+    applied by `wiring.rs` at the next start, before anything opens the database.
+    - The replaced data goes to `before-import/`, one copy.
+    - The archive's settings replace this PC's, except `dataDir`, and the key when the archive has none.
+  - **Checks before staging:**
+    - the manifest says the app is Build Fetcher, with a known format;
+    - only known entries with plain names (no path escape);
+    - CRCs;
+    - SQLite `integrity_check`;
+    - no newer schema;
+    - settings are a JSON object.
+  - **Interfaces:**
+    - routes `POST /api/backup/export`, `POST /api/backup/import`, `GET /api/backup/pending`, `POST /api/backup/cancel`;
+    - `StoreHandle::{export_backup, stage_import, pending_import, cancel_import}`;
+    - desktop bridge `backup.pickSave`, `backup.pickOpen` and `restart` (native dialogs, origin-checked).

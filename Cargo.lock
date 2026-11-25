@@ -394,6 +394,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "bf-core",
+ "chrono",
  "filetime",
  "parking_lot",
  "rayon",

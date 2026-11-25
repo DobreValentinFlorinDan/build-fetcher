@@ -12,6 +12,11 @@
   const bridge = {
     info: () => call('desktop_info'),
     openFolder: (p) => call('open_folder', { path: String(p) }),
+    backup: {
+      pickSave: (name) => call('backup_pick_save', { name: String(name) }),
+      pickOpen: () => call('backup_pick_open'),
+    },
+    restart: () => call('restart_app'),
     settings: {
       get: () => call('settings_get'),
       set: (patch) => call('settings_set', { patch: patch ?? {} }),

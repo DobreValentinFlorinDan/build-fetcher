@@ -116,6 +116,14 @@ pub trait StoreHandle: Send + Sync {
     fn set_account(&self, account: &OwnAccount);
     /// The user's game just ended: their new game is fetched first.
     fn game_ended(&self);
+    /// Writes a backup zip (settings, a snapshot of the database, the learner's checkpoints) to `path`; the Riot API
+    /// key only with `include_key`. The app keeps running meanwhile.
+    fn export_backup(&self, path: &std::path::Path, include_key: bool) -> anyhow::Result<bf_store::backup::ExportReport>;
+    /// Checks a backup zip and stages it; it replaces the data at the next start.
+    fn stage_import(&self, path: &std::path::Path) -> anyhow::Result<bf_store::backup::ImportSummary>;
+    /// The import staged and waiting for a restart, if any.
+    fn pending_import(&self) -> Option<bf_store::backup::ImportSummary>;
+    fn cancel_import(&self) -> anyhow::Result<()>;
 }
 
 /// The learner, as the server sees it (its recommendations come through `BuildSource`).

@@ -21,8 +21,10 @@ pub const DEFAULT_DISK_BUDGET: u64 = 2 * GB;
 pub const MIN_DISK_BUDGET: u64 = 256 * 1024 * 1024;
 pub const MAX_DISK_BUDGET: u64 = 1024 * GB;
 pub const MAX_TIER_A: usize = 20;
-/// The share of tier B games whose timeline is fetched (tier A games always get theirs).
-pub const DEFAULT_TIMELINE_SAMPLE: f64 = 0.1;
+/// The share of tier B games whose timeline is fetched (tier A games always get theirs). 0.25 since 1.2.0 (0.1
+/// before): the model learns item choices and the enemy's items only from games with a timeline. A settings file that
+/// already holds a value keeps it; Settings → Regions and rank changes it.
+pub const DEFAULT_TIMELINE_SAMPLE: f64 = 0.25;
 
 /// The settings file's key for the API key.
 pub const KEY_FIELD: &str = "riotApiKey";

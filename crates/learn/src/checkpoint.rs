@@ -311,4 +311,29 @@ mod tests {
         assert_eq!(decode_nn(&encode_nn(&n)).unwrap(), n);
         assert!(decode_nn(&encode_logistic(&m)).is_err());
     }
+
+    /// A checkpoint from before 1.2.0 (no enemy region) loads with that region at zero and predicts exactly as before,
+    /// whatever the enemy builds.
+    #[test]
+    fn checkpoints_before_the_enemy_region_load_and_predict_unchanged() {
+        use crate::features::{GameState, Situation};
+        use crate::logistic::{featurize, GLOBAL, PAIR};
+        let mut m = LogisticModel::default();
+        let mut s = Situation { champion: 39, role: Some(bf_core::build::Role::Top), items: vec![3153, 3078], boots: Some(3047), state: GameState { minute: 20.0, ..Default::default() }, ..Default::default() };
+        let mut f = vec![];
+        featurize(&s, &mut f);
+        for (k, (j, _)) in f.iter().enumerate() {
+            m.w[*j as usize] = 0.01 * (k as f64 + 1.0);
+        }
+        let bytes = encode_logistic(&m);
+        // Only slots below the old dimension were written.
+        let old = decode_logistic(&bytes).unwrap();
+        assert!(old.w[GLOBAL + PAIR..].iter().all(|x| *x == 0.0));
+        let before = old.logit(&s);
+        s.enemy_items = vec![3075, 3742, 3047, 6333];
+        s.enemy_tags = [1.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.5];
+        featurize(&s, &mut f);
+        assert!(f.iter().any(|(j, _)| *j as usize >= GLOBAL + PAIR), "enemy features go to the new region");
+        assert_eq!(old.logit(&s), before);
+    }
 }

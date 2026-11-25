@@ -8,7 +8,7 @@
 
 use crate::backend::{select_backend, Backend};
 use crate::checkpoint::{self, Entry, Manifest, Store, LOGISTIC, SHARED_NN};
-use crate::features::{sample_weight, samples_of, sigmoid, ItemClasses, Rng, Sample, Situation, WeightOptions};
+use crate::features::{sample_weight, samples_of, sigmoid, ItemClasses, PatchClock, Rng, Sample, Situation, WeightOptions};
 use crate::logistic::{LogisticModel, TrainOptions};
 use crate::metrics::{evaluation, fmt_metrics, Evaluation, Guardrail};
 use crate::nn::{NetOptions, SharedNet};
@@ -41,6 +41,29 @@ pub struct LearnConfig {
     pub use_gpu: bool,
     /// The GPU's results are checked against the processor's once every this many calls.
     pub verify_every: u64,
+    /// Continuous learning (`absorb`).
+    #[serde(default)]
+    pub continuous: ContinuousOptions,
+}
+
+/// How `absorb` learns: in passes over at least `min_games` new games, with a smaller step than a batch update.
+///
+/// Measured on synthetic data (docs/MEASUREMENTS.md, 1.2.0): one game at a time at the batch update's full step, a
+/// game's examples (one label per team) pulled the draft around so much that 40 checks in a row kept the model in
+/// force. With a tenth of the step and one pass, 12 of 40 checks were accepted and the model ended better than with
+/// batches of 500 (log loss 0.4911 against 0.4937, on the same 6,000 games).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ContinuousOptions {
+    pub min_games: usize,
+    /// The step size relative to a batch update's, and passes over each group of games.
+    pub lr_scale: f64,
+    pub epochs: usize,
+}
+
+impl Default for ContinuousOptions {
+    fn default() -> Self {
+        ContinuousOptions { min_games: 1, lr_scale: 0.1, epochs: 1 }
+    }
 }
 
 impl Default for LearnConfig {
@@ -57,6 +80,7 @@ impl Default for LearnConfig {
             seed: 0xbf_1ea2,
             use_gpu: false,
             verify_every: 50,
+            continuous: ContinuousOptions::default(),
         }
     }
 }
@@ -103,8 +127,10 @@ pub enum Outcome {
     Waiting,
     /// Stopped between mini-batches (activity, deadline or `interrupt`): nothing changed except as reported.
     Interrupted,
-    /// Not started: the user isn't idle.
+    /// Not started: the user isn't idle (for `absorb`: in champ select or a game).
     NotIdle,
+    /// Continuous learning: games learnt into the draft (`absorb`).
+    Learned,
     /// Learning is off.
     Disabled,
 }
@@ -188,6 +214,61 @@ struct State {
     replay: Vec<Sample>,
     replay_seen: u64,
     contexts: Arc<BTreeMap<String, Vec<Situation>>>,
+    /// Continuous learning: the models being trained game by game, not served until a check accepts them.
+    draft: Option<Draft>,
+}
+
+/// The draft of continuous learning (in memory only: after a restart, the games since the last accepted model are
+/// learnt again from the store, so nothing is lost).
+struct Draft {
+    logistic: LogisticModel,
+    net: Option<SharedNet>,
+    /// The last record learnt (the store's cursor moves to it when a check accepts the draft).
+    cursor: u64,
+    clock: PatchClock,
+    /// Records learnt since the last accepted model, and since the last check.
+    records: usize,
+    since_check: usize,
+    /// Held-out examples (one record in `CALIB_HOLDOUT`) gathered since the last accepted model, for the calibration.
+    cal: Vec<Sample>,
+    /// Checks in a row that kept the model in force.
+    rejections: u32,
+    last_check: Instant,
+}
+
+/// How often continuous learning is checked, and when a draft that keeps failing is dropped.
+#[derive(Clone, Debug)]
+pub struct CheckPolicy {
+    /// Learnt games before a check.
+    pub every: usize,
+    /// A check with fewer games after this long (slow fetching).
+    pub max_wait: Option<Duration>,
+    /// Fewer held-out validation matches: no check yet.
+    pub min_validation: usize,
+    /// Checks in a row that kept the model in force before the draft is reset to it.
+    pub max_rejections: u32,
+}
+
+impl Default for CheckPolicy {
+    fn default() -> Self {
+        CheckPolicy { every: 150, max_wait: Some(Duration::from_secs(3600)), min_validation: 100, max_rejections: 8 }
+    }
+}
+
+/// What one `absorb` call did.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbsorbReport {
+    /// `Learned`, or why nothing was learnt (`NoData`, `Waiting` before the first model, `NotIdle` in champ select or
+    /// a game, `Disabled`, `Interrupted`).
+    pub outcome: Outcome,
+    pub records: usize,
+    pub samples: usize,
+    pub replayed: usize,
+    pub train_ms: f64,
+    /// Records learnt since the last check, and since the last accepted model.
+    pub since_check: usize,
+    pub since_accepted: usize,
 }
 
 pub struct Learner {
@@ -286,7 +367,7 @@ impl Learner {
             classes,
             config,
             backend,
-            state: Mutex::new(State { manifest: manifest.clone(), logistic, net, replay: vec![], replay_seen: 0, contexts }),
+            state: Mutex::new(State { manifest: manifest.clone(), logistic, net, replay: vec![], replay_seen: 0, contexts, draft: None }),
             manifest: RwLock::new(manifest),
             served: RwLock::new(None),
             stop: AtomicBool::new(false),
@@ -353,6 +434,9 @@ impl Learner {
     pub fn rollback(&self, version: &str) -> Result<()> {
         let mut st = self.state.lock();
         let e = st.manifest.entry(version).cloned().ok_or_else(|| anyhow!("no checkpoint {version}"))?;
+        // A draft learnt on top of the model being replaced is dropped; its games are learnt again on top of this one.
+        st.draft = None;
+        *self.waiting.lock() = None;
         if e.kind == LOGISTIC {
             st.logistic = Some((e.version.clone(), Arc::new(self.store.load_logistic(&e)?)));
             st.manifest.active_logistic = Some(e.version.clone());
@@ -427,6 +511,242 @@ impl Learner {
         self.publish(&st);
         self.store.log(&line);
         Ok(Some(line))
+    }
+
+    /// A model is in force (continuous learning starts from it; the first one comes from `train_step`).
+    pub fn has_model(&self) -> bool {
+        self.state.lock().logistic.is_some()
+    }
+
+    /// Continuous learning, step 1 of 2: learns the games that arrived since the last call into the draft (both model
+    /// steps, warm, with as many replayed examples as new ones). Nothing is served or saved; `check` decides. Runs
+    /// unless the user is in champ select or a game (`activity`), and stops at the deadline. Before the first model it
+    /// does nothing (`Waiting`): that one comes from `train_step`, on a big batch.
+    pub fn absorb(&self, src: &dyn DataSource, max_records: usize, deadline: Option<Duration>, activity: Arc<dyn Fn() -> Activity + Send + Sync>) -> Result<AbsorbReport> {
+        let t0 = Instant::now();
+        let mut rep = AbsorbReport { outcome: Outcome::NoData, records: 0, samples: 0, replayed: 0, train_ms: 0.0, since_check: 0, since_accepted: 0 };
+        let busy = |a: Activity| matches!(a, Activity::ChampSelect | Activity::InGame);
+        if !self.learning.load(Ordering::SeqCst) {
+            rep.outcome = Outcome::Disabled;
+            return Ok(rep);
+        }
+        if busy(activity()) {
+            rep.outcome = Outcome::NotIdle;
+            return Ok(rep);
+        }
+        let mut st = self.state.lock();
+        let Some((_, in_force)) = st.logistic.clone() else {
+            rep.outcome = Outcome::Waiting;
+            return Ok(rep);
+        };
+        self.stop.store(false, Ordering::SeqCst);
+        let start = st.draft.as_ref().map(|d| d.cursor).unwrap_or(st.manifest.cursor);
+        let mut records = vec![];
+        let mut cursor = start;
+        while records.len() < max_records {
+            let page = src.records_after(cursor, (max_records - records.len()).min(1000))?;
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().map(|p| p.0).unwrap_or(cursor);
+            records.extend(page.into_iter().map(|p| p.1));
+        }
+        if let Some(d) = &st.draft {
+            rep.since_check = d.since_check;
+            rep.since_accepted = d.records;
+        }
+        if records.is_empty() {
+            return Ok(rep);
+        }
+        let co = &self.config.continuous;
+        if records.len() < co.min_games {
+            // Too few for a pass: nothing is read, they are learnt with the next ones.
+            rep.outcome = Outcome::Waiting;
+            return Ok(rep);
+        }
+        let mut lo = self.config.logistic.clone();
+        lo.learning_rate *= co.lr_scale;
+        lo.epochs = co.epochs;
+        let mut no = self.config.net.clone();
+        no.learning_rate *= co.lr_scale;
+        no.epochs = co.epochs;
+        let deadline = deadline.map(|d| t0 + d);
+        let stop_flag = &self.stop;
+        let act = activity.clone();
+        let stop = move || stop_flag.load(Ordering::SeqCst) || busy(act()) || deadline.map(|d| Instant::now() > d).unwrap_or(false);
+        let mut draft = match st.draft.take() {
+            Some(d) => d,
+            None => Draft {
+                logistic: (*in_force).clone(),
+                net: st.net.as_ref().map(|(_, n)| (**n).clone()),
+                cursor: start,
+                clock: st.manifest.clock.clone(),
+                records: 0,
+                since_check: 0,
+                cal: vec![],
+                rejections: 0,
+                last_check: Instant::now(),
+            },
+        };
+        for r in &records {
+            if let Some(v) = r.version {
+                draft.clock.observe(v);
+            }
+        }
+        if let Some(p) = src.current_patch()? {
+            draft.clock.observe_patch(p);
+        }
+        let (cal_records, train_records): (Vec<&MatchRecord>, Vec<&MatchRecord>) = records.iter().partition(|r| fnv(&r.match_id) % CALIB_HOLDOUT == 0);
+        let fresh: Vec<Sample> = train_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        let cal: Vec<Sample> = cal_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        let mut rng = Rng(self.config.seed ^ cursor.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let fresh_n = fresh.len();
+        let mut train = fresh;
+        let k = ((fresh_n as f64 * self.config.replay_share) as usize).min(st.replay.len());
+        let mut pick: Vec<usize> = (0..st.replay.len()).collect();
+        rng.shuffle(&mut pick);
+        train.extend(pick[..k].iter().map(|i| st.replay[*i].clone()));
+        let weights: Vec<f64> = train.iter().map(|s| sample_weight(s, &draft.clock, &self.config.weights)).collect();
+        let mut order: Vec<usize> = (0..train.len()).collect();
+        rng.shuffle(&mut order);
+        // On copies, so an interrupted call leaves the draft as it was (its games are learnt again next time).
+        let mut lm = draft.logistic.clone();
+        let done = lm.train(&train, &weights, &order, &lo, self.backend.as_ref(), &stop).is_ok();
+        let mut net = draft.net.clone();
+        let done = done
+            && match (&mut net, self.config.train_net) {
+                (Some(n), true) => {
+                    let base = self.logits_of(&lm, &train);
+                    n.train(&train, &base, &weights, &order, &no, &stop).is_ok()
+                }
+                (None, true) => {
+                    let mut n = SharedNet::new(self.config.net.seed ^ self.config.seed);
+                    let base = self.logits_of(&lm, &train);
+                    let ok = n.train(&train, &base, &weights, &order, &no, &stop).is_ok();
+                    net = Some(n);
+                    ok
+                }
+                _ => true,
+            };
+        rep.train_ms = t0.elapsed().as_secs_f64() * 1e3;
+        if !done {
+            rep.outcome = Outcome::Interrupted;
+            st.draft = Some(draft);
+            return Ok(rep);
+        }
+        draft.logistic = lm;
+        draft.net = net;
+        draft.cursor = cursor;
+        draft.records += records.len();
+        draft.since_check += records.len();
+        draft.cal.extend(cal);
+        self.remember(&mut st, &train[..fresh_n], &mut rng);
+        rep.outcome = Outcome::Learned;
+        rep.records = records.len();
+        rep.samples = fresh_n;
+        rep.replayed = k;
+        rep.since_check = draft.since_check;
+        rep.since_accepted = draft.records;
+        *self.waiting.lock() = Some(self.draft_line(&st, &draft, None));
+        st.draft = Some(draft);
+        Ok(rep)
+    }
+
+    fn draft_line(&self, st: &State, d: &Draft, policy: Option<&CheckPolicy>) -> String {
+        let every = policy.map(|p| p.every).unwrap_or(CheckPolicy::default().every);
+        let v = st.logistic.as_ref().map(|(v, _)| v.as_str()).unwrap_or("the baseline");
+        format!(
+            "Learning game by game: {} new games since {v}; the next check is at {} games since the last one ({} so far).",
+            d.records,
+            every,
+            d.since_check
+        )
+    }
+
+    /// Continuous learning, step 2 of 2: when the draft has learnt `policy.every` games since the last check (or some
+    /// games and `max_wait` has passed), the guardrail compares it with the models in force. Accepted: it is served
+    /// and saved, and the store's cursor moves past its games. Rejected: it keeps learning; after `max_rejections`
+    /// checks in a row it is reset to the model in force and its games count as read (they stay in the replay
+    /// sample). None when no check was due.
+    pub fn check(&self, src: &dyn DataSource, policy: &CheckPolicy) -> Result<Option<UpdateReport>> {
+        let t0 = Instant::now();
+        let mut st = self.state.lock();
+        let Some(mut d) = st.draft.take() else { return Ok(None) };
+        let overdue = policy.max_wait.map(|w| d.last_check.elapsed() >= w).unwrap_or(false);
+        if d.since_check == 0 || (d.since_check < policy.every && !overdue) {
+            st.draft = Some(d);
+            return Ok(None);
+        }
+        let val_records = src.validation_records()?;
+        if val_records.len() < policy.min_validation {
+            *self.waiting.lock() = Some(format!("Waiting for {} held-out games to check updates on ({} so far).", policy.min_validation, val_records.len()));
+            st.draft = Some(d);
+            return Ok(None);
+        }
+        let val: Vec<Sample> = val_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        drop(val_records);
+        let mut report = UpdateReport {
+            outcome: Outcome::Rejected,
+            steps: vec![],
+            records: d.since_check,
+            samples: 0,
+            replayed: 0,
+            batches: 0,
+            validation_samples: val.len(),
+            train_ms: 0.0,
+            eval_ms: 0.0,
+            elapsed_ms: 0.0,
+            rss_bytes: None,
+            peak_rss_bytes: None,
+            model_bytes: 0,
+            backend: self.backend.name(),
+            log: vec![],
+        };
+        let mut cand = d.logistic.clone();
+        let cal_w: Vec<f64> = d.cal.iter().map(|s| sample_weight(s, &d.clock, &self.config.weights)).collect();
+        cand.fit_calibration(&d.cal, &cal_w, self.backend.as_ref());
+        let detail = format!("{} games learnt one by one since the model in force ({} checks kept it)", d.records, d.rejections);
+        let accepted = self.judge_logistic(&mut st, src, cand.clone(), &val, d.records, &detail, &mut report)?;
+        let mut accepted_any = accepted;
+        if accepted {
+            d.logistic = cand;
+            if let Some(n) = d.net.clone() {
+                // The draft's network learnt on top of the draft's step 1, which is now the one in force.
+                accepted_any |= self.judge_net(&mut st, n, &val, d.records, &mut report)?;
+            }
+        }
+        d.since_check = 0;
+        d.last_check = Instant::now();
+        if accepted {
+            st.manifest.cursor = d.cursor;
+            st.manifest.records_seen += d.records as u64;
+            st.manifest.clock = d.clock.clone();
+            d.records = 0;
+            d.cal.clear();
+            d.rejections = 0;
+            st.draft = Some(d);
+        } else {
+            d.rejections += 1;
+            if d.rejections >= policy.max_rejections {
+                report.log.push(format!(
+                    "the draft failed {} checks in a row: it starts again from the model in force; its {} games count as read",
+                    d.rejections, d.records
+                ));
+                st.manifest.cursor = d.cursor;
+                st.manifest.records_seen += d.records as u64;
+                st.manifest.clock = d.clock.clone();
+            } else {
+                st.draft = Some(d);
+            }
+        }
+        self.store.prune(&mut st.manifest);
+        self.store.save_manifest(&st.manifest)?;
+        self.store.save_contexts(&st.contexts)?;
+        *self.last_update.lock() = Instant::now();
+        report.outcome = if accepted_any { Outcome::Accepted } else { Outcome::Rejected };
+        *self.waiting.lock() = st.draft.as_ref().map(|d| self.draft_line(&st, d, Some(policy)));
+        self.finish(&mut report, t0, &st);
+        Ok(Some(report))
     }
 
     /// One guarded update (see the module notes). Call it only while the user is idle; it stops between mini-batches
@@ -561,50 +881,13 @@ impl Learner {
         report.batches += batches;
         let cal_w: Vec<f64> = cal.iter().map(|s| sample_weight(s, &clock, &self.config.weights)).collect();
         cand.fit_calibration(&cal, &cal_w, self.backend.as_ref());
-        let te = Instant::now();
-        let before = match &st.logistic {
-            Some((_, m)) => evaluate(&self.logits_of(m, &val).iter().map(|z| sigmoid(*z)).collect::<Vec<_>>(), &val),
-            None => evaluate(&baseline_predictions(src, &val)?, &val),
-        };
-        let z_cand = self.logits_of(&cand, &val);
-        let after_full = evaluate_full(&z_cand.iter().map(|z| sigmoid(*z)).collect::<Vec<_>>(), &val);
-        let after = after_full.metrics.clone();
-        report.eval_ms += te.elapsed().as_secs_f64() * 1e3;
-        let reason = self.config.guardrail.worse(&before, &after_full);
-        let what_before = st.logistic.as_ref().map(|(v, _)| v.clone()).unwrap_or_else(|| "the champion-role win rate".into());
-        let mut accepted_any = false;
-        let mut step = StepReport { kind: LOGISTIC.into(), accepted: reason.is_none(), version: None, before: before.clone(), after: after.clone(), reason: reason.clone() };
-        match &reason {
-            None => {
-                let v = self.commit_logistic(&mut st, &cand, &after, n_records as u64)?;
-                report.log.push(format!(
-                    "{v} logistic accepted over {what_before}: {} -> {}; {} records, {} examples (+{} replayed), {} mini-batches; calibration temperature {:.3} + {:.3} per 10 min",
-                    fmt_metrics(&before),
-                    fmt_metrics(&after),
-                    n_records,
-                    fresh_n,
-                    k,
-                    batches,
-                    cand.calib[0],
-                    cand.calib[1]
-                ));
-                step.version = Some(v.clone());
-                st.logistic = Some((v, Arc::new(cand)));
-                accepted_any = true;
-            }
-            Some(why) => report.log.push(format!(
-                "logistic update rejected, keeping {what_before}: {why} ({} -> {}); {} records",
-                fmt_metrics(&before),
-                fmt_metrics(&after),
-                n_records
-            )),
-        }
-        report.steps.push(step);
+        let detail = format!("{} records, {} examples (+{} replayed), {} mini-batches", n_records, fresh_n, k, batches);
+        let mut accepted_any = self.judge_logistic(&mut st, src, cand, &val, n_records, &detail, &mut report)?;
 
         // Step 2, on top of the step 1 now in force.
         let mut interrupted = false;
         if self.config.train_net {
-            if let Some((lv, lm)) = st.logistic.clone() {
+            if let Some((_, lm)) = st.logistic.clone() {
                 let tt = Instant::now();
                 let base = self.logits_of(&lm, &train);
                 let mut net = st.net.as_ref().map(|(_, n)| (**n).clone()).unwrap_or_else(|| SharedNet::new(self.config.net.seed ^ self.config.seed));
@@ -618,48 +901,7 @@ impl Learner {
                     }
                     Ok(b) => {
                         report.batches += b;
-                        let te = Instant::now();
-                        let z_l = self.logits_of(&lm, &val);
-                        let m_l_full = evaluate_full(&z_l.iter().map(|z| sigmoid(*z)).collect::<Vec<_>>(), &val);
-                        let m_l = m_l_full.metrics.clone();
-                        let old = st.net.as_ref().map(|(v, n)| {
-                            let r = Self::residuals_of(n, &val);
-                            (v.clone(), evaluate_full(&z_l.iter().zip(&r).map(|(z, r)| sigmoid(z + r)).collect::<Vec<_>>(), &val))
-                        });
-                        let r_new = Self::residuals_of(&net, &val);
-                        let m_new_full = evaluate_full(&z_l.iter().zip(&r_new).map(|(z, r)| sigmoid(z + r)).collect::<Vec<_>>(), &val);
-                        let m_new = m_new_full.metrics.clone();
-                        report.eval_ms += te.elapsed().as_secs_f64() * 1e3;
-                        // It must beat step 1 alone, and the network in force if there is one.
-                        let mut why = self.config.guardrail.worse(&m_l, &m_new_full).map(|w| format!("vs step 1 {lv}: {w}"));
-                        if why.is_none() {
-                            if let Some((ov, om)) = &old {
-                                why = self.config.guardrail.worse(&om.metrics, &m_new_full).map(|w| format!("vs {ov}: {w}"));
-                            }
-                        }
-                        let reference = old.as_ref().map(|o| o.1.metrics.clone()).unwrap_or(m_l.clone());
-                        let mut step = StepReport { kind: SHARED_NN.into(), accepted: why.is_none(), version: None, before: reference.clone(), after: m_new.clone(), reason: why.clone() };
-                        match why {
-                            None => {
-                                let v = self.commit_nn(&mut st, &net, &m_new, &lv, n_records as u64)?;
-                                report.log.push(format!("{v} shared-nn accepted on top of {lv}: {} -> {}", fmt_metrics(&reference), fmt_metrics(&m_new)));
-                                step.version = Some(v.clone());
-                                st.net = Some((v, Arc::new(net)));
-                                accepted_any = true;
-                            }
-                            Some(w) => {
-                                report.log.push(format!("shared-nn update rejected: {w}"));
-                                // A network in force that no longer beats the new step 1 stops being served.
-                                if let Some((ov, om)) = &old {
-                                    if let Some(w2) = self.config.guardrail.worse(&m_l, om) {
-                                        report.log.push(format!("{ov} no longer beats {lv} ({w2}); serving step 1 alone"));
-                                        st.net = None;
-                                        st.manifest.active_nn = None;
-                                    }
-                                }
-                            }
-                        }
-                        report.steps.push(step);
+                        accepted_any |= self.judge_net(&mut st, net, &val, n_records, &mut report)?;
                     }
                 }
             }
@@ -683,6 +925,93 @@ impl Learner {
         };
         self.finish(&mut report, t0, &st);
         Ok(report)
+    }
+
+    /// The guardrail on a step 1 candidate: against the model in force (or the champion-role baseline before the
+    /// first model). Accepted: committed, served from now on, and true.
+    #[allow(clippy::too_many_arguments)]
+    fn judge_logistic(&self, st: &mut State, src: &dyn DataSource, cand: LogisticModel, val: &[Sample], n_records: usize, detail: &str, report: &mut UpdateReport) -> Result<bool> {
+        let te = Instant::now();
+        let before = match &st.logistic {
+            Some((_, m)) => evaluate(&self.logits_of(m, val).iter().map(|z| sigmoid(*z)).collect::<Vec<_>>(), val),
+            None => evaluate(&baseline_predictions(src, val)?, val),
+        };
+        let z_cand = self.logits_of(&cand, val);
+        let after_full = evaluate_full(&z_cand.iter().map(|z| sigmoid(*z)).collect::<Vec<_>>(), val);
+        let after = after_full.metrics.clone();
+        report.eval_ms += te.elapsed().as_secs_f64() * 1e3;
+        let reason = self.config.guardrail.worse(&before, &after_full);
+        let what_before = st.logistic.as_ref().map(|(v, _)| v.clone()).unwrap_or_else(|| "the champion-role win rate".into());
+        let mut step = StepReport { kind: LOGISTIC.into(), accepted: reason.is_none(), version: None, before: before.clone(), after: after.clone(), reason: reason.clone() };
+        let accepted = match &reason {
+            None => {
+                let v = self.commit_logistic(st, &cand, &after, n_records as u64)?;
+                report.log.push(format!(
+                    "{v} logistic accepted over {what_before}: {} -> {}; {detail}; calibration temperature {:.3} + {:.3} per 10 min",
+                    fmt_metrics(&before),
+                    fmt_metrics(&after),
+                    cand.calib[0],
+                    cand.calib[1]
+                ));
+                step.version = Some(v.clone());
+                st.logistic = Some((v, Arc::new(cand)));
+                true
+            }
+            Some(why) => {
+                report.log.push(format!("logistic update rejected, keeping {what_before}: {why} ({} -> {}); {n_records} records", fmt_metrics(&before), fmt_metrics(&after)));
+                false
+            }
+        };
+        report.steps.push(step);
+        Ok(accepted)
+    }
+
+    /// The guardrail on a step 2 candidate, on top of the step 1 in force: it must beat step 1 alone, and the network
+    /// in force if there is one. A network in force that no longer beats step 1 stops being served.
+    fn judge_net(&self, st: &mut State, net: SharedNet, val: &[Sample], n_records: usize, report: &mut UpdateReport) -> Result<bool> {
+        let Some((lv, lm)) = st.logistic.clone() else { return Ok(false) };
+        let te = Instant::now();
+        let z_l = self.logits_of(&lm, val);
+        let m_l_full = evaluate_full(&z_l.iter().map(|z| sigmoid(*z)).collect::<Vec<_>>(), val);
+        let m_l = m_l_full.metrics.clone();
+        let old = st.net.as_ref().map(|(v, n)| {
+            let r = Self::residuals_of(n, val);
+            (v.clone(), evaluate_full(&z_l.iter().zip(&r).map(|(z, r)| sigmoid(z + r)).collect::<Vec<_>>(), val))
+        });
+        let r_new = Self::residuals_of(&net, val);
+        let m_new_full = evaluate_full(&z_l.iter().zip(&r_new).map(|(z, r)| sigmoid(z + r)).collect::<Vec<_>>(), val);
+        let m_new = m_new_full.metrics.clone();
+        report.eval_ms += te.elapsed().as_secs_f64() * 1e3;
+        let mut why = self.config.guardrail.worse(&m_l, &m_new_full).map(|w| format!("vs step 1 {lv}: {w}"));
+        if why.is_none() {
+            if let Some((ov, om)) = &old {
+                why = self.config.guardrail.worse(&om.metrics, &m_new_full).map(|w| format!("vs {ov}: {w}"));
+            }
+        }
+        let reference = old.as_ref().map(|o| o.1.metrics.clone()).unwrap_or(m_l.clone());
+        let mut step = StepReport { kind: SHARED_NN.into(), accepted: why.is_none(), version: None, before: reference.clone(), after: m_new.clone(), reason: why.clone() };
+        let accepted = match why {
+            None => {
+                let v = self.commit_nn(st, &net, &m_new, &lv, n_records as u64)?;
+                report.log.push(format!("{v} shared-nn accepted on top of {lv}: {} -> {}", fmt_metrics(&reference), fmt_metrics(&m_new)));
+                step.version = Some(v.clone());
+                st.net = Some((v, Arc::new(net)));
+                true
+            }
+            Some(w) => {
+                report.log.push(format!("shared-nn update rejected: {w}"));
+                if let Some((ov, om)) = &old {
+                    if let Some(w2) = self.config.guardrail.worse(&m_l, om) {
+                        report.log.push(format!("{ov} no longer beats {lv} ({w2}); serving step 1 alone"));
+                        st.net = None;
+                        st.manifest.active_nn = None;
+                    }
+                }
+                false
+            }
+        };
+        report.steps.push(step);
+        Ok(accepted)
     }
 
     fn finish(&self, report: &mut UpdateReport, t0: Instant, st: &State) {

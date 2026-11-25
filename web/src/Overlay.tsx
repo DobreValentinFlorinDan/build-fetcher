@@ -1,24 +1,28 @@
 // /overlay: the in-game HUD (a transparent, always-on-top, click-through window in the desktop app). It highlights
 // choices and leaves them to the player: next buys and counter items are always several ranked options with the games
-// behind them. Nothing pops up, flashes or alerts, and no timer is tracked.
+// behind them. Nothing pops up, flashes or alerts, and no timer is tracked. Since 1.2.0 each option also shows its
+// price against the user's own gold, the part to buy now, and what in the enemy's items (as the scoreboard shows
+// them) makes it fit. The enemy's gold is never shown or estimated: the game doesn't show it.
 import { useEffect, useLayoutEffect, useRef } from 'react';
 import { useServer } from './api.ts';
 import { Evidence, Img } from './components.tsx';
 import { useDd } from './ddragon.ts';
 import { desktop } from './desktop.ts';
-import { pct, ROLE_NAMES } from './format.ts';
-import type { RankedOption } from './types.ts';
+import { goldLine, pct, ROLE_NAMES } from './format.ts';
+import type { BuyNote, RankedOption } from './types.ts';
 
-function Row({ o, reason }: { o: RankedOption; reason?: string }) {
+function Row({ o, reason, buy, first }: { o: RankedOption; reason?: string; buy?: BuyNote; first?: boolean }) {
   const dd = useDd();
   const id = Number(o.option.key.split(/[,>]/)[0]);
+  const why = reason ?? buy?.reason ?? undefined;
   return (
-    <li className="flex items-center gap-2" title={`${o.label}${reason ? ` — ${reason}` : ''}`}>
+    <li className={`flex items-center gap-2 ${first ? 'rounded border-l-2 border-accent pl-1.5' : ''}`} title={`${o.label}${why ? ` — ${why}` : ''}`}>
       <Img src={dd.itemIcon(id)} title={dd.itemName(id)} size={26} />
       <div className="min-w-0">
         <div className="truncate text-[12px] text-fg">{o.label}</div>
         <Evidence o={o} compact />
-        {reason && <div className="truncate text-[11px] text-muted">{reason}</div>}
+        {buy && <div className={`truncate text-[11px] ${buy.short === 0 ? 'text-good' : 'text-muted'}`}>{goldLine(buy, (p) => dd.itemName(p))}</div>}
+        {why && <div className="truncate text-[11px] text-muted">{why}</div>}
       </div>
     </li>
   );
@@ -39,6 +43,7 @@ export function Overlay() {
   }, []);
   const ctx = live?.context;
   const advice = live?.advice;
+  const buyFor = (o: RankedOption) => advice?.buys?.find((b) => b.item === Number(o.option.key.split(/[,>]/)[0]));
   return (
     <div ref={ref} className="w-[300px] select-none rounded-lg border border-line/70 bg-bg/85 p-2.5 text-fg">
       <header className="mb-2 flex items-center justify-between text-[11px] text-muted">
@@ -51,12 +56,16 @@ export function Overlay() {
         <div className="space-y-2.5">
           <section>
             <h3 className="mb-1 text-[10px] uppercase tracking-wider text-muted">Next buys to consider</h3>
-            <ol className="space-y-1.5">{advice.nextBuys.slice(0, 4).map((o) => <Row key={o.option.key} o={o} />)}</ol>
+            <ol className="space-y-1.5">
+              {advice.nextBuys.slice(0, 3).map((o, i) => (
+                <Row key={o.option.key} o={o} first={i === 0} buy={buyFor(o)} />
+              ))}
+            </ol>
           </section>
           {advice.counters.length > 0 && (
             <section>
               <h3 className="mb-1 text-[10px] uppercase tracking-wider text-muted">Answers to the enemy build</h3>
-              <ol className="space-y-1.5">{advice.counters.slice(0, 3).map(([o, why]) => <Row key={o.option.key} o={o} reason={why} />)}</ol>
+              <ol className="space-y-1.5">{advice.counters.slice(0, 3).map(([o, why]) => <Row key={o.option.key} o={o} reason={why} buy={buyFor(o)} />)}</ol>
             </section>
           )}
           {advice.predictedWin != null && <p className="text-[11px] text-muted">Model's win chance from here: {pct(advice.predictedWin, 0)}</p>}

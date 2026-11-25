@@ -2,9 +2,13 @@
 //!
 //! The learner reads the store (`DataSource`), so it starts once the store is open. Until then builds answer "not
 //! ready" and the status is empty. The training cycle runs on a thread of its own:
-//!   wait until the user is idle and learning is on → one `train_step` (bounded in records and time, stopped between
-//!   mini-batches as soon as the user leaves Idle) → after an update that saw new records, the store's clean-up to the
-//!   learning window and the disk budget, with the bytes freed in the log.
+//!   - **The first model:** while the user is idle and learning is on, one `train_step` on a big batch (bounded in
+//!     records and time, stopped between mini-batches as soon as the user leaves Idle).
+//!   - **Then, continuously (1.2.0):** games are learnt as they arrive (`absorb`, a few milliseconds each), whenever
+//!     the user is not in champ select or a game, idle or not. Every 150 games the draft is checked against the model
+//!     in force (`check`) and served only if it is no worse.
+//!   - **Idle only:** re-scoring the model in force (at most hourly), and the store's clean-up to the learning window
+//!     and the disk budget after checks (at most hourly), with the bytes freed in the log.
 //!
 //! The store's baseline for tier B counts stays the champion-role win rate on purpose: the model's prediction already
 //! includes the build options, so using it as the expected win would cancel the very effect the counts measure.
@@ -12,7 +16,7 @@
 use crate::handles::LearnerHandle;
 use crate::wire_store::RealStore;
 use bf_core::build::{Activity, BuildRecommendation, BuildSource, DataSource, DraftContext, LiveAdvice, LiveContext, ModelStatus};
-use bf_learn::{Budget, LearnConfig, Learner, Outcome, RecommendConfig, Recommender};
+use bf_learn::{Budget, CheckPolicy, LearnConfig, Learner, Outcome, RecommendConfig, Recommender};
 use bf_store::LearnWindow;
 use parking_lot::{Mutex, RwLock};
 use std::path::PathBuf;
@@ -24,9 +28,9 @@ use std::time::Duration;
 const RECORDS_PER_STEP: usize = 2_000;
 /// The first update waits for this many new games (on synthetic data, 500 were rejected several times).
 const FIRST_MIN_RECORDS: usize = 2_000;
-/// Later updates wait for this many, so each one has enough evidence to beat the model in force...
+/// Batch updates after the first (no longer used by the cycle since 1.2.0, which learns continuously; kept for a
+/// first update that gets this far without a model).
 const MIN_RECORDS: usize = 500;
-/// ...or go ahead with fewer after this long (slow fetching: a shared key, few regions).
 const MAX_WAIT: Duration = Duration::from_secs(6 * 3600);
 /// Held-out matches the guardrail needs before it can judge an update (the store keeps 1 timeline game in 10).
 const MIN_VALIDATION: usize = 100;
@@ -36,6 +40,16 @@ const RESCORE_EVERY: Duration = Duration::from_secs(3600);
 const STEP_DEADLINE: Duration = Duration::from_secs(120);
 /// How often the cycle looks again when there is nothing to do or the user is busy.
 const IDLE_POLL: Duration = Duration::from_secs(30);
+/// Continuous learning: games learnt per call at most (a backlog, e.g. after a restart, goes in pieces), the time one
+/// call may take, and how soon the cycle looks for new games again (the fetcher stores about one every few seconds).
+const ABSORB_MAX: usize = 200;
+const ABSORB_DEADLINE: Duration = Duration::from_secs(20);
+const ABSORB_POLL: Duration = Duration::from_secs(5);
+/// Games learnt between checks, and a check with fewer after this long.
+const CHECK_EVERY: usize = 150;
+const CHECK_MAX_WAIT: Duration = Duration::from_secs(3600);
+/// Clean-up after checks runs at most this often.
+const CLEANUP_EVERY: Duration = Duration::from_secs(3600);
 
 fn activity_code(a: Activity) -> u8 {
     match a {
@@ -96,35 +110,67 @@ impl RealLearner {
     /// The training cycle (its own thread: training is CPU-bound and must never hold up the server's tasks).
     fn run(self: Arc<Self>, learner: Arc<Learner>, db: Arc<bf_store::Store>, store: Arc<RealStore>) {
         let mut last_rescore: Option<std::time::Instant> = None;
+        let mut last_cleanup: Option<std::time::Instant> = None;
+        let mut checked_since_cleanup = false;
+        let policy = CheckPolicy { every: CHECK_EVERY, max_wait: Some(CHECK_MAX_WAIT), min_validation: MIN_VALIDATION, ..CheckPolicy::default() };
         loop {
             let settings = bf_store::settings::load(&bf_store::settings::settings_file()).0;
             learner.set_learning(settings.learning);
-            if !settings.learning || activity_of(self.activity.load(Ordering::SeqCst)) != Activity::Idle {
+            let activity = activity_of(self.activity.load(Ordering::SeqCst));
+            if !settings.learning {
                 std::thread::sleep(IDLE_POLL);
                 continue;
             }
-            let act = self.activity.clone();
-            let budget = Budget {
-                max_records: RECORDS_PER_STEP,
-                deadline: Some(STEP_DEADLINE),
-                activity: Arc::new(move || activity_of(act.load(Ordering::SeqCst))),
-                min_records: MIN_RECORDS,
-                first_min_records: FIRST_MIN_RECORDS,
-                max_wait: Some(MAX_WAIT),
-                min_validation: MIN_VALIDATION,
-            };
-            let report = match learner.train_step(&*db, &budget) {
-                Ok(r) => r,
-                Err(e) => {
-                    crate::bf_log!("[learn] update failed: {}", crate::routes::scrub(&e.to_string()));
+            let idle = activity == Activity::Idle;
+            let mut nothing_new = false;
+            if !learner.has_model() {
+                // The first model, from a big batch, while idle.
+                if !idle {
                     std::thread::sleep(IDLE_POLL);
                     continue;
                 }
-            };
-            // Nothing to learn yet (no or too few new records, learning off, not idle): wait without a log line every poll.
-            // The dashboard's model status says what the learner waits for.
-            if matches!(report.outcome, Outcome::NoData | Outcome::Waiting) && last_rescore.is_none_or(|t: std::time::Instant| t.elapsed() >= RESCORE_EVERY) {
-                // Idle and waiting: show today's scores (early ones rest on a handful of held-out matches).
+                match self.first_model(&learner, &db) {
+                    Some(Outcome::Accepted | Outcome::Rejected) => checked_since_cleanup = true,
+                    Some(Outcome::NoData | Outcome::Waiting) => nothing_new = true,
+                    _ => {}
+                }
+            } else {
+                if matches!(activity, Activity::ChampSelect | Activity::InGame) {
+                    std::thread::sleep(IDLE_POLL);
+                    continue;
+                }
+                let act = self.activity.clone();
+                let a = match learner.absorb(&*db, ABSORB_MAX, Some(ABSORB_DEADLINE), Arc::new(move || activity_of(act.load(Ordering::SeqCst)))) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        crate::bf_log!("[learn] learning new games failed: {}", crate::routes::scrub(&e.to_string()));
+                        std::thread::sleep(IDLE_POLL);
+                        continue;
+                    }
+                };
+                nothing_new = a.outcome == Outcome::NoData;
+                match learner.check(&*db, &policy) {
+                    Ok(Some(report)) => {
+                        crate::bf_log!(
+                            "[learn] check after {} games: {:?}, {:.1} s (eval {:.1} s), memory {}",
+                            report.records,
+                            report.outcome,
+                            report.elapsed_ms / 1000.0,
+                            report.eval_ms / 1000.0,
+                            mb(report.rss_bytes)
+                        );
+                        for line in &report.log {
+                            crate::bf_log!("[learn] {line}");
+                        }
+                        *self.last_cycle.lock() = report.log.clone();
+                        checked_since_cleanup = true;
+                    }
+                    Ok(None) => {}
+                    Err(e) => crate::bf_log!("[learn] check failed: {}", crate::routes::scrub(&e.to_string())),
+                }
+            }
+            // Idle only: re-score while nothing new arrives (at most hourly), and clean up after checks (at most hourly).
+            if idle && nothing_new && last_rescore.is_none_or(|t: std::time::Instant| t.elapsed() >= RESCORE_EVERY) {
                 last_rescore = Some(std::time::Instant::now());
                 match learner.rescore(&*db) {
                     Ok(Some(line)) => crate::bf_log!("[learn] {line}"),
@@ -132,11 +178,49 @@ impl RealLearner {
                     Err(e) => crate::bf_log!("[learn] re-scoring failed: {}", crate::routes::scrub(&e.to_string())),
                 }
             }
-            if matches!(report.outcome, Outcome::NoData | Outcome::Waiting | Outcome::NotIdle | Outcome::Disabled) {
-                std::thread::sleep(IDLE_POLL);
-                continue;
+            if idle && checked_since_cleanup && last_cleanup.is_none_or(|t: std::time::Instant| t.elapsed() >= CLEANUP_EVERY) {
+                last_cleanup = Some(std::time::Instant::now());
+                checked_since_cleanup = false;
+                // Keep what the learner still needs, delete the rest, compact.
+                match db.cleanup(&LearnWindow::default(), settings.disk_budget_bytes, &store.other_parts()) {
+                    Ok(c) => crate::bf_log!(
+                        "[cleanup] freed {:.1} MB ({} records, {} count rows; trimmed patches {:?}) in {} ms; {:.1} MB used{}",
+                        c.freed_bytes as f64 / 1e6,
+                        c.records_deleted,
+                        c.count_rows_deleted,
+                        c.patches_trimmed.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                        c.millis,
+                        c.after_bytes as f64 / 1e6,
+                        if c.over_budget { " (still over the budget)" } else { "" }
+                    ),
+                    Err(e) => crate::bf_log!("[cleanup] failed: {}", crate::routes::scrub(&e.to_string())),
+                }
             }
-            let mb = |b: Option<u64>| b.map(|b| format!("{:.0} MB", b as f64 / 1e6)).unwrap_or_else(|| "?".into());
+            std::thread::sleep(if nothing_new || !learner.has_model() { IDLE_POLL } else { ABSORB_POLL });
+        }
+    }
+
+    /// The first model: one guarded batch update, when enough games and held-out matches exist (the model status says
+    /// what it waits for meanwhile). None when the update failed.
+    fn first_model(&self, learner: &Learner, db: &bf_store::Store) -> Option<Outcome> {
+        let act = self.activity.clone();
+        let budget = Budget {
+            max_records: RECORDS_PER_STEP,
+            deadline: Some(STEP_DEADLINE),
+            activity: Arc::new(move || activity_of(act.load(Ordering::SeqCst))),
+            min_records: MIN_RECORDS,
+            first_min_records: FIRST_MIN_RECORDS,
+            max_wait: Some(MAX_WAIT),
+            min_validation: MIN_VALIDATION,
+        };
+        let report = match learner.train_step(db, &budget) {
+            Ok(r) => r,
+            Err(e) => {
+                crate::bf_log!("[learn] update failed: {}", crate::routes::scrub(&e.to_string()));
+                return None;
+            }
+        };
+        if !matches!(report.outcome, Outcome::NoData | Outcome::Waiting | Outcome::NotIdle | Outcome::Disabled) {
             crate::bf_log!(
                 "[learn] {:?}: {} records, {} examples, {:.1} s (train {:.1} s, eval {:.1} s), memory {} (peak {}), {}",
                 report.outcome,
@@ -153,28 +237,13 @@ impl RealLearner {
                 crate::bf_log!("[learn] {line}");
             }
             *self.last_cycle.lock() = report.log.clone();
-            match report.outcome {
-                Outcome::Accepted | Outcome::Rejected => {
-                    // A training cycle ended: keep what the learner still needs, delete the rest, compact.
-                    match db.cleanup(&LearnWindow::default(), settings.disk_budget_bytes, &store.other_parts()) {
-                        Ok(c) => crate::bf_log!(
-                            "[cleanup] freed {:.1} MB ({} records, {} count rows; trimmed patches {:?}) in {} ms; {:.1} MB used{}",
-                            c.freed_bytes as f64 / 1e6,
-                            c.records_deleted,
-                            c.count_rows_deleted,
-                            c.patches_trimmed.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
-                            c.millis,
-                            c.after_bytes as f64 / 1e6,
-                            if c.over_budget { " (still over the budget)" } else { "" }
-                        ),
-                        Err(e) => crate::bf_log!("[cleanup] failed: {}", crate::routes::scrub(&e.to_string())),
-                    }
-                }
-                Outcome::NoData | Outcome::Waiting | Outcome::NotIdle | Outcome::Disabled => std::thread::sleep(IDLE_POLL),
-                Outcome::Interrupted => std::thread::sleep(Duration::from_secs(5)),
-            }
         }
+        Some(report.outcome)
     }
+}
+
+fn mb(b: Option<u64>) -> String {
+    b.map(|b| format!("{:.0} MB", b as f64 / 1e6)).unwrap_or_else(|| "?".into())
 }
 
 impl LearnerHandle for RealLearner {
@@ -205,8 +274,9 @@ impl LearnerHandle for RealLearner {
 
     fn set_activity(&self, activity: Activity) {
         self.activity.store(activity_code(activity), Ordering::SeqCst);
-        if activity != Activity::Idle {
-            // Champ select or a game: stop at the next mini-batch, whatever the step's own check sees.
+        if matches!(activity, Activity::ChampSelect | Activity::InGame) {
+            // Champ select or a game: stop at the next mini-batch, whatever the step's own check sees. (A first-model
+            // update also stops when the PC is merely in use: its own check asks for Idle.)
             if let Some(l) = self.learner.get() {
                 l.interrupt();
             }

@@ -408,6 +408,17 @@ impl BuildSource for StubBuildSource {
         if !owned(anti_heal) {
             counters.push((self.option(BuildOption::late_item(anti_heal), self.item_name(anti_heal), 80, 1), "Anti-heal against sustain".to_string()));
         }
-        Ok(LiveAdvice { next_buys, counters, predicted_win: None, notes: vec![STUB_NOTE.into()] })
+        // Prices at full cost (the stand-in doesn't walk recipes), against the user's gold.
+        let gold = ctx.my_gold.max(0.0) as u32;
+        let buys = next_buys
+            .iter()
+            .chain(counters.iter().map(|c| &c.0))
+            .map(|o| {
+                let id = o.option.item_ids()[0];
+                let cost = self.data.read().as_ref().and_then(|d| d.item(id).map(|i| i.gold_total as u32)).unwrap_or(3000);
+                BuyNote { item: id, cost, short: cost.saturating_sub(gold), part: None, part_cost: None, reason: None }
+            })
+            .collect();
+        Ok(LiveAdvice { next_buys, counters, predicted_win: None, notes: vec![STUB_NOTE.into()], buys })
     }
 }

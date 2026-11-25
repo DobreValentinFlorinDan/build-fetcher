@@ -13,6 +13,9 @@
 //! - `FIRST_ITEM`: Irelia rushing Blade of the Ruined King gains +0.3 over Trinity Force.
 //! - `ALLY_SYNERGY`: Jinx (bottom) with Lulu on her team gains +0.5 logit. Step 1 has no champion × ally features,
 //!   so only step 2 (the shared network) can learn this one.
+//! - `ITEM_VS_ARMOR` (only with `SyntheticConfig::armor_effect`, so the other sets stay as they were): a bottom
+//!   player who builds Lord Dominik's Regards gains +0.6 logit when the enemy team builds 7 or more armor items and
+//!   boots, and loses 0.1 otherwise. Only the enemy's items tell the two apart (1.2.0).
 //! - Thin champion: Ivern (jungle) is picked rarely (a few dozen games per 4,000 matches).
 //!
 //! Everything else (other runes, summoners, skill orders, items) has no effect, apart from a small fixed strength per
@@ -38,6 +41,11 @@ pub const ITEM_VS_MAGIC: f64 = 0.6;
 pub const ITEM_NOT_VS_MAGIC: f64 = -0.1;
 pub const FIRST_ITEM: f64 = 0.3;
 pub const ALLY_SYNERGY: f64 = 0.5;
+pub const LDR: i64 = 3036;
+pub const ITEM_VS_ARMOR: f64 = 0.6;
+pub const ITEM_NOT_VS_ARMOR: f64 = -0.1;
+/// Enemy armor items and boots from which `ITEM_VS_ARMOR` applies.
+pub const ARMOR_STACK: usize = 7;
 pub const JINX: i64 = 222;
 pub const LULU: i64 = 117;
 
@@ -62,6 +70,8 @@ pub struct SyntheticConfig {
     pub effect_scale: f64,
     /// First match id number (to append sources without clashes).
     pub first_id: u64,
+    /// Plant `ITEM_VS_ARMOR`.
+    pub armor_effect: bool,
 }
 
 impl Default for SyntheticConfig {
@@ -77,6 +87,7 @@ impl Default for SyntheticConfig {
             flip_labels: false,
             effect_scale: 1.0,
             first_id: 7_000_000_000,
+            armor_effect: false,
         }
     }
 }
@@ -250,9 +261,12 @@ struct Generator<'a> {
 }
 
 impl Generator<'_> {
-    fn effect(&self, champion: i64, role: Role, plan: &Plan, opponent: i64, enemy_profile: Option<DamageProfile>, allies: &[i64]) -> f64 {
+    fn effect(&self, champion: i64, role: Role, plan: &Plan, opponent: i64, enemy_profile: Option<DamageProfile>, allies: &[i64], enemy_armor: usize) -> f64 {
         let s = self.cfg.effect_scale;
         let mut e = self.strength.get(&champion).copied().unwrap_or(0.0);
+        if self.cfg.armor_effect && role == Role::Bottom && plan.items.contains(&LDR) {
+            e += if enemy_armor >= ARMOR_STACK { ITEM_VS_ARMOR } else { ITEM_NOT_VS_ARMOR } * s;
+        }
         if champion == IRELIA && role == Role::Top && opponent == DARIUS && plan.page.1[0] == CONQUEROR {
             e += RUNE_VS_OPPONENT * s;
         }
@@ -285,10 +299,14 @@ impl Generator<'_> {
         }
         let plans: Vec<Vec<Plan>> = (0..2).map(|t| (0..5).map(|r| plan(rng, &self.menus[r], champs[t][r], &self.excl)).collect()).collect();
         let profile = |t: usize| DamageProfile::of_team(self.data, &champs[1 - t]);
+        // Armor items and boots each team ends up with (what `ITEM_VS_ARMOR` responds to on the other side).
+        let armor = |t: usize| -> usize {
+            plans[t].iter().flat_map(|p| p.items.iter().chain(std::iter::once(&p.boots))).filter(|i| self.classes.tags.get(i).map(|m| m & 1 != 0).unwrap_or(false)).count()
+        };
         let mut z = 0.0;
         for t in 0..2 {
             for (r, role) in Role::ALL.iter().enumerate() {
-                let e = self.effect(champs[t][r], *role, &plans[t][r], champs[1 - t][r], profile(t), &champs[t]);
+                let e = self.effect(champs[t][r], *role, &plans[t][r], champs[1 - t][r], profile(t), &champs[t], armor(1 - t));
                 z += if t == 0 { e } else { -e };
             }
         }

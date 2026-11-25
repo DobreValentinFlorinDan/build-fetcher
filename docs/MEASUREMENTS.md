@@ -327,3 +327,91 @@ These use the store's own figures, about 1 KB of database per counted game and 1
 - **Windows.** All measurements here are Linux. CI builds and tests on Windows (and builds the NSIS installer), but
   memory, timings, the overlay on a running game, the tray and the League client import were not exercised on
   Windows.
+
+## 1.2.0: enemy items, continuous learning, gold in the overlay
+
+All on Linux and synthetic data (`crates/learn/examples/measure_continuous.rs`, release build).
+
+```
+cargo run --release -p bf-learn --example measure_continuous -- 4000 6000 1 150 1
+```
+
+Each run: a first model from 4,000 games, then 6,000 more arriving one at a time, 1,500 held-out matches.
+
+### Continuous learning against batches (same 6,000 games, armor effect planted)
+
+| how new games are learnt | checks | accepted | final held-out log loss |
+|---|---|---|---|
+| 1.1: batches of 500 (`train_step`) | 12 | 2 | 0.49368 |
+| one game at a time, full step, 2 passes | 40 | 0 | 0.49640 (never left the first model) |
+| groups of 10, step × 0.3, 1 pass | 40 | 8 | 0.49142 |
+| groups of 10, step × 0.1, 1 pass | 40 | 13 | 0.49117 |
+| **one game at a time, step × 0.1, 1 pass (default)** | 40 | 12 | **0.49112** |
+| one game at a time, step × 0.3, 1 pass | 40 | 5 | 0.49167 |
+
+At the full step, one game's examples share one label per team, so every game pulled the draft its way. Each check
+then found it worse than the model in force (log loss 0.505–0.519 against 0.496).
+
+- **Time:**
+  - learning one game: **5.6 ms** (both model steps; a copy of the draft is made first, so an interrupted call
+    changes nothing);
+  - a check: **0.48 s** on 1,500 held-out matches. The app's held-out sample grows to 4,000 matches: about 1.3 s,
+    extrapolated.
+- **Memory:**
+  - The logistic model is 15.0 MiB in memory, 13.5 MiB before 1.2.0 (+65,536 slots × 3 numbers).
+  - The draft is a second copy, and each call makes a third for a moment: about +30 MiB while learning
+    continuously.
+  - Process peaks in these runs: 410–630 MB. Most of it is the 10,000-game synthetic source held in memory.
+- **Disk:** the largest model file is 1.2 MB, the same with and without the enemy features; only touched slots are
+  written. The checkpoint folder held 2.6 MB after 12 accepted models (old ones are pruned).
+
+### The enemy's items in the model
+
+| synthetic set | enemy features | first model: log loss, train time | after 2,000 more games |
+|---|---|---|---|
+| no effect planted on enemy items | off (1.1.1 features) | 0.50490, 8.3 s | 0.50362 |
+| no effect planted on enemy items | on | 0.50580, 8.8 s | 0.50427 |
+
+- **What it costs:** where the enemy's items carry no signal, the extra inputs cost about 0.0007–0.0009 log loss
+  (noise) and 6% training time.
+- **Where an effect is planted** (`ITEM_VS_ARMOR`: Lord Dominik's Regards +0.6 logit against 7+ enemy armor items,
+  −0.1 otherwise), the test `enemy_armor_moves_the_item_advice` passes. With 3 items, at 30 minutes, the model adds
+  **+3.4 pts** for Lord Dominik's against 9 enemy armor items and **−0.7 pts** against none. That's about a quarter
+  of the planted size, because L2 shrinks it.
+- **What it took:**
+  - **Per-item enemy features and raw item counts were dropped.** Counts grow with game time. With them the first
+    model was overconfident late and failed its calibration check: 30+ min 0.054 against a 0.031 noise floor. Tags
+    are now shares of the enemy's build (at least 8 items counted) × 4.
+  - **Item × tag pairs are limited to armor, magic resist, healing, anti-heal and health.** Damage type already
+    meets items through the damage profile.
+  - **The item × tag half has its own, lighter L2 (3e-3).** At the global part's 1e-2 the planted effect came out
+    at a tenth of its size.
+- **Old checkpoints:** the new weights sit after the pair region and start at zero. A 1.1 checkpoint loads and
+  predicts exactly as before (test `checkpoints_before_the_enemy_region_load_and_predict_unchanged`). 1.1 cannot
+  load a 1.2 checkpoint: "checkpoint slot out of range".
+
+### Request cost of timelines (estimated from the 1.0 figures, not measured on real data)
+
+The 1.0 store figures were 1.35 requests per new game with 10% timelines (1.58 with tier A games too). Each extra
+10% of timelines adds about 0.1 requests per game:
+
+| timelines for other champions | requests per game (estimated) | games per hour, against 10% |
+|---|---|---|
+| 10% (before 1.2.0) | 1.35 | — |
+| 25% (new default) | 1.50 | −10% |
+| 50% | 1.75 | −23% |
+| 100% | 2.25 | −40% |
+
+### Not verified in 1.2.0
+
+- **Real data:**
+  - whether the enemy's items improve the model on real games;
+  - how often real checks are accepted;
+  - the real request cost per timeline share.
+- **The overlay on Windows in a live game:** gold, the part to buy now, and reasons. CI builds it; nobody looked at
+  it in a game.
+- **CPU load of continuous learning while gaming outside League:** each game takes milliseconds and a check about a
+  second every few minutes, but this was not measured on the user's PC.
+- **The first model's calibration check stays fragile on synthetic data.** With 2,000 games, some seeds fail it on
+  one window with or without the enemy features (seed 5: the 0-10 min window 0.033 against 0.026 allowed). This
+  was so before 1.2.0. The app retries with the next 2,000 games.

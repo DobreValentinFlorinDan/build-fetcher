@@ -72,7 +72,25 @@ pub struct Situation {
     pub items: Vec<i64>,
     pub boots: Option<i64>,
     pub state: GameState,
+    /// The enemy team's completed items and boots at this minute (what the Tab scoreboard shows), and what they add up
+    /// to (`enemy_tag_levels`). Empty before 1.2.0 and without a timeline.
+    #[serde(default)]
+    pub enemy_items: Vec<i64>,
+    #[serde(default)]
+    pub enemy_tags: [f64; ENEMY_TAGS],
 }
+
+/// What an enemy team's items add up to, one level per tag: armor, magic resist, healing (life steal, omnivamp),
+/// anti-heal, ability power, attack damage (crit included) and health.
+pub const ENEMY_TAGS: usize = 7;
+pub const TAG_NAMES: [&str; ENEMY_TAGS] = ["armor", "magic resist", "healing", "anti-heal", "ability power", "attack damage", "health"];
+/// A tag's level is its share of the team's build items, counted against at least this many items: a share does
+/// not grow with game time (a count would, and then acts as a clock: on synthetic data it left late-game predictions
+/// overconfident), and the floor keeps one early item from reading as a whole build.
+const TAG_MIN_ITEMS: f64 = 8.0;
+/// Shares times this, so a typical level is about 1 (a quarter of a build): the weights it needs stay small next to
+/// the L2 pull, which a rarely seen item × tag pair would otherwise not overcome.
+const TAG_SCALE: f64 = 4.0;
 
 /// A training or validation example.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -113,6 +131,8 @@ pub fn window_of(minute: f64) -> usize {
 pub struct ItemClasses {
     pub completed: HashSet<i64>,
     pub boots: HashSet<i64>,
+    /// Enemy-build tags per completed item and boots (bit k: `TAG_NAMES[k]`).
+    pub tags: std::collections::HashMap<i64, u8>,
 }
 
 impl ItemClasses {
@@ -123,9 +143,45 @@ impl ItemClasses {
                 c.completed.insert(it.id);
             } else if is_tier2_boots(Some(it)) {
                 c.boots.insert(it.id);
+            } else {
+                continue;
             }
+            let has = |t: &str| it.tags.iter().any(|x| x == t);
+            let bits = [
+                it.armor > 0.0,
+                it.magic_resist > 0.0,
+                has("LifeSteal") || has("SpellVamp"),
+                it.anti_heal,
+                has("SpellDamage"),
+                has("Damage") || has("CriticalStrike"),
+                has("Health"),
+            ];
+            let mask = bits.iter().enumerate().fold(0u8, |m, (k, b)| if *b { m | (1 << k) } else { m });
+            c.tags.insert(it.id, mask);
         }
         c
+    }
+
+    /// Completed items and boots only (what counts as an enemy's build).
+    pub fn is_build_item(&self, id: i64) -> bool {
+        self.completed.contains(&id) || self.boots.contains(&id)
+    }
+
+    /// The levels of `ENEMY_TAGS` that `items` (one team's) add up to.
+    pub fn enemy_tag_levels(&self, items: &[i64]) -> [f64; ENEMY_TAGS] {
+        let mut n = [0.0; ENEMY_TAGS];
+        let mut total = 0.0;
+        for id in items {
+            let Some(m) = self.tags.get(id).copied() else { continue };
+            total += 1.0;
+            for (k, x) in n.iter_mut().enumerate() {
+                if m & (1 << k) != 0 {
+                    *x += 1.0;
+                }
+            }
+        }
+        let of = f64::max(total, TAG_MIN_ITEMS);
+        n.map(|x| TAG_SCALE * x / of)
     }
 }
 
@@ -214,6 +270,8 @@ fn draft_situation(r: &MatchRecord, i: usize, data: &StaticData) -> Situation {
         items: vec![],
         boots: None,
         state: GameState::default(),
+        enemy_items: vec![],
+        enemy_tags: [0.0; ENEMY_TAGS],
     }
 }
 
@@ -240,6 +298,9 @@ fn team_events_until(r: &MatchRecord, team: u16, second: u32) -> [f64; 4] {
 /// draft-only example per player at minute 0 (what champ select knows).
 pub fn samples_of(r: &MatchRecord, data: &StaticData, classes: &ItemClasses) -> Vec<Sample> {
     let mut out = Vec::new();
+    // What every player owns at each sampled minute (each player's enemies need it too).
+    let owned: Vec<Vec<(Vec<i64>, Option<i64>)>> =
+        r.players.iter().map(|q| MINUTES.iter().map(|m| if r.has_timeline() { owned_at(&q.purchases, *m as u32 * 60, classes) } else { (vec![], None) }).collect()).collect();
     for (i, p) in r.players.iter().enumerate() {
         if p.role.is_none() || p.champion <= 0 {
             continue;
@@ -253,18 +314,26 @@ pub fn samples_of(r: &MatchRecord, data: &StaticData, classes: &ItemClasses) -> 
             continue;
         }
         let opp = r.players.iter().position(|q| q.team != p.team && q.role == p.role);
-        for &m in MINUTES.iter() {
+        for (k, &m) in MINUTES.iter().enumerate() {
             let at = m as u32 * 60;
             if at + 60 > r.duration_s {
                 break;
             }
             let Some(f) = r.frames[i].get(m as usize) else { break };
             let of = opp.and_then(|j| r.frames.get(j)).and_then(|fr| fr.get(m as usize));
-            let (items, boots) = owned_at(&p.purchases, at, classes);
+            let (items, boots) = owned[i][k].clone();
             let ev = team_events_until(r, p.team, at);
             let mut s = base.clone();
             s.items = items;
             s.boots = boots;
+            s.enemy_items = r
+                .players
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| q.team != p.team)
+                .flat_map(|(j, _)| owned[j][k].0.iter().copied().chain(owned[j][k].1))
+                .collect();
+            s.enemy_tags = classes.enemy_tag_levels(&s.enemy_items);
             s.state = GameState {
                 minute: m as f64,
                 gold_diff: of.map(|o| f.total_gold as f64 - o.total_gold as f64).unwrap_or(0.0),

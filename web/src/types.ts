@@ -68,11 +68,23 @@ export type LiveContext = {
   barons: [number, number];
 };
 
+/** An item's price from where the user stands (1.2.0): their own gold and items, the enemy's items. */
+export type BuyNote = {
+  item: number;
+  cost: number;
+  short: number;
+  part: number | null;
+  partCost: number | null;
+  reason: string | null;
+};
+
 export type LiveAdvice = {
   nextBuys: RankedOption[];
   counters: [RankedOption, string][];
   predictedWin: number | null;
   notes: string[];
+  /** Absent from servers before 1.2.0. */
+  buys?: BuyNote[];
 };
 
 export type BudgetStatus = { scope: string; limits: string; used: number; ours: number; limit: number; windowS: number; shared: boolean };
@@ -151,6 +163,8 @@ export type AppSettings = {
   learning: boolean;
   /** Fetching on, or paused by the user. */
   fetching: boolean;
+  /** Share of games outside tier A fetched with their timeline (0-1): item timings, and the enemy's items. */
+  timelineSample: number;
   firstRunComplete: boolean;
 };
 

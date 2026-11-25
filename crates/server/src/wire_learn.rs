@@ -102,6 +102,11 @@ impl RealLearner {
                     continue;
                 }
             };
+            // Nothing to learn (no new records, learning off, not idle): wait without a log line every poll.
+            if matches!(report.outcome, Outcome::NoData | Outcome::NotIdle | Outcome::Disabled) {
+                std::thread::sleep(IDLE_POLL);
+                continue;
+            }
             let mb = |b: Option<u64>| b.map(|b| format!("{:.0} MB", b as f64 / 1e6)).unwrap_or_else(|| "?".into());
             crate::bf_log!(
                 "[learn] {:?}: {} records, {} examples, {:.1} s (train {:.1} s, eval {:.1} s), memory {} (peak {}), {}",

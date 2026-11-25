@@ -52,7 +52,7 @@ Riot API ──► fetch scheduler ──► ingestion + data-quality filters �
               budget, shared-key    players counted                     validation sample
               aware                                                            │
                                                                                ▼
-dashboard / champ select / overlay ◄── recommender ◄── learner (CPU; GPU-checked similarities)
+dashboard / champ select / overlay ◄── recommender ◄── learner (CPU; optional GPU, checked against the CPU)
           (127.0.0.1 only)                              guarded, versioned checkpoints
 ```
 
@@ -110,8 +110,14 @@ It is retrained incrementally as games arrive, with warm-started mini-batches, a
 window. An update that makes any of them worse is rejected and the previous checkpoint is kept. Checkpoints are
 versioned, and Settings rolls back to an earlier one in one click. The log says what each update changed.
 
-**Determinism.** Results on the CPU are deterministic for the same data. The GPU path (NVIDIA, through the driver
-loaded at run time) is checked against the CPU on a sample, and any mismatch falls back to the CPU.
+**Calibration.** The model's confidence is calibrated with a temperature that varies over game time. It is fitted on
+recent records held out from training (never on the validation games), and it changes only when the evidence is
+statistically clear.
+
+**Determinism and GPU.** Results on the CPU are deterministic for the same data, whatever the number of threads.
+Settings → GPU (NVIDIA, off by default) moves the training and evaluation forward pass and the draft-similarity sums
+onto the card, through the driver loaded at run time. Nothing extra needs installing. The GPU's results are checked
+against the CPU before use and on a sample while it runs; any mismatch or error falls back to the CPU for good.
 
 ### Disk
 

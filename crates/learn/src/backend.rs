@@ -4,10 +4,16 @@
 //! against the processor before using it and then one call in `verify_every`, and falls back to the processor for
 //! good on any difference beyond `TOLERANCE`, any error, or no device.
 //!
-//! What the GPU does in 1.0: `similarities` (the "contexts like the user's" weights the recommender uses), through the
-//! PTX kernel bf-core ships and irelia-companion proved bit-identical to the processor. `logits` (the training and
-//! evaluation forward pass) has no kernel in bf-core yet, so on CUDA it stays on the processor; the trait and the
-//! checks are in place for one, and tests drive them with a stand-in accelerator. Real-GPU timing was not measured.
+//! What the GPU does in 1.0, when the user turns it on (Settings → GPU, off by default):
+//! - `logits`, the logistic model's forward pass in training (every mini-batch) and evaluation, through bf-core's
+//!   hand-written `logits.ptx`. It rounds every product and sum on its own in index order, as `Csr::row_dot` does, so
+//!   it is meant to be bit-identical; the check allows `TOLERANCE` anyway. The weights stay on the card and only the
+//!   ones a mini-batch changed are sent.
+//! - `similarities` (the "contexts like the user's" weights the recommender uses), through the PTX kernel bf-core
+//!   ships and irelia-companion proved bit-identical to the processor.
+//! The shared network (step 2), the gradients and the optimiser stay on the processor. No real GPU was available
+//! when this was written: the checks, the fallback and the kernel's arithmetic (by an interpreter, bf-core
+//! tests/ptx_logits.rs) were tested, the driver's compilation of the PTX and real-GPU timing were not.
 
 use parking_lot::Mutex;
 use rayon::prelude::*;
@@ -300,7 +306,7 @@ fn similarity_cases() -> Vec<(Vec<f64>, usize, usize, Vec<f64>, f64)> {
 
 // ------------------------------------------------------------------------------------------------ CUDA
 
-/// The NVIDIA GPU through bf-core's run-time-loaded driver interface: similarities only (see the module notes).
+/// The NVIDIA GPU through bf-core's run-time-loaded driver interface (see the module notes).
 pub struct CudaAccelerator {
     gpu: bf_core::gpu::cuda::Gpu,
     name: String,
@@ -318,8 +324,9 @@ impl Accelerator for CudaAccelerator {
     fn name(&self) -> String {
         self.name.clone()
     }
-    fn logits(&mut self, _rows: &Csr, _w: &[f64], _out: &mut [f64]) -> Option<Result<(), String>> {
-        None
+    fn logits(&mut self, rows: &Csr, w: &[f64], out: &mut [f64]) -> Option<Result<(), String>> {
+        let ptr: Vec<u64> = rows.ptr.iter().map(|p| *p as u64).collect();
+        Some(self.gpu.logits(&ptr, &rows.idx, &rows.val, w, out).map_err(|e| e.to_string()))
     }
     fn similarities(&mut self, flat: &[f64], rows: usize, d: usize, q: &[f64], den: f64, out: &mut [f64]) -> Option<Result<(), String>> {
         if d > bf_core::gpu::cuda::MAX_D {

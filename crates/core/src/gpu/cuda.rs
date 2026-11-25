@@ -4,7 +4,8 @@
 //! compiles it for the card. One Gpu for the evaluation, behind a lock; each call makes the card's context current on
 //! the calling thread.
 //!
-//! 0.19.0's weighted-sums kernel is not ported: 0.x kept it off (IRELIA_GPU_SUMS=1) because the processor was faster.
+//! Build Fetcher adds `logits` (logits.ptx, hand-written): the logistic model's forward pass for training and
+//! evaluation, off unless the user turns the GPU on, checked against the processor by crates/learn.
 
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 
@@ -17,6 +18,8 @@ const BLOCK: u32 = 256;
 const Q_AT: usize = 40;
 
 pub const SIMILARITIES_PTX: &str = include_str!("similarities.ptx");
+/// The logistic model's forward pass (`logits_csr`) and the weight update (`scatter`), hand-written PTX.
+pub const LOGITS_PTX: &str = include_str!("logits.ptx");
 
 fn error_text(code: c_int) -> &'static str {
     match code {
@@ -175,7 +178,31 @@ pub struct Gpu {
     params: Vec<u8>,
     marks: Vec<u32>,
     closed: bool,
+    /// The forward-pass kernels, loaded the first time `logits` is called.
+    lk: Option<LogitsKernel>,
     pub device: GpuDevice,
+}
+
+/// A buffer on the card, grown as needed (never shrunk until closed).
+#[derive(Default)]
+struct DevBuf {
+    ptr: u64,
+    bytes: usize,
+}
+
+/// The forward-pass module, the weights kept on the card, and a copy of what was sent (to send only what changed).
+struct LogitsKernel {
+    module: Ptr,
+    f_logits: Ptr,
+    f_scatter: Ptr,
+    w: DevBuf,
+    shadow: Vec<f64>,
+    ptr: DevBuf,
+    idx: DevBuf,
+    val: DevBuf,
+    out: DevBuf,
+    s_idx: DevBuf,
+    s_val: DevBuf,
 }
 
 // The driver's handles are used under the Gpu's lock, with the context made current on the calling thread.
@@ -254,6 +281,7 @@ impl Gpu {
                 params: vec![0u8; Q_AT + 8 * MAX_D],
                 marks: vec![0u32; 1 + LIST],
                 closed: false,
+                lk: None,
                 device,
             })
         }
@@ -384,6 +412,125 @@ impl Gpu {
         Ok((0..rows).filter(|i| out[*i] == -1.0).collect())
     }
 
+    /// Makes `b` at least `bytes` large (contents not kept).
+    fn grow(cu: &Driver, b: &mut DevBuf, bytes: usize, what: &str) -> R<()> {
+        if b.bytes >= bytes.max(8) {
+            return Ok(());
+        }
+        unsafe {
+            if b.bytes > 0 {
+                (cu.cuMemFree_v2)(b.ptr);
+                b.bytes = 0;
+            }
+            let size = (bytes.max(8) as f64 * 1.25).ceil() as usize;
+            let mut p = 0u64;
+            check((cu.cuMemAlloc_v2)(&mut p, size), what)?;
+            *b = DevBuf { ptr: p, bytes: size };
+        }
+        Ok(())
+    }
+
+    fn launch(cu: &Driver, f: Ptr, n: usize, args: &mut [*mut c_void]) -> R<()> {
+        let blocks = n.div_ceil(BLOCK as usize).max(1) as c_uint;
+        unsafe { check((cu.cuLaunchKernel)(f, blocks, 1, 1, BLOCK, 1, 1, 0, std::ptr::null_mut(), args.as_mut_ptr(), std::ptr::null_mut()), "Starting the kernel") }
+    }
+
+    /// The logistic model's forward pass: out[r] = Σ w[idx[k]] · val[k] over k in ptr[r]..ptr[r + 1] (compressed
+    /// sparse rows), each product and sum rounded on its own, in index order. The weights stay on the card; only the
+    /// ones that changed since the last call are sent (the training loop changes a few hundred per mini-batch).
+    pub fn logits(&mut self, ptr: &[u64], idx: &[u32], val: &[f64], w: &[f64], out: &mut [f64]) -> R<()> {
+        if self.closed {
+            return Err(CudaError("The GPU was closed".into()));
+        }
+        let rows = ptr.len().saturating_sub(1);
+        if rows == 0 {
+            return Ok(());
+        }
+        if rows > u32::MAX as usize || w.len() > u32::MAX as usize || idx.len() != val.len() || out.len() < rows {
+            return Err(CudaError("logits: sizes out of range".into()));
+        }
+        unsafe {
+            check((self.cu.cuCtxSetCurrent)(self.ctx), "Opening the GPU context")?;
+        }
+        if self.lk.is_none() {
+            let mut module: Ptr = std::ptr::null_mut();
+            let image = CString::new(LOGITS_PTX).unwrap();
+            unsafe {
+                check((self.cu.cuModuleLoadData)(&mut module, image.as_ptr() as *const c_void), "Loading the forward-pass kernel")?;
+                let (mut fl, mut fs): (Ptr, Ptr) = (std::ptr::null_mut(), std::ptr::null_mut());
+                let r = check((self.cu.cuModuleGetFunction)(&mut fl, module, c"logits_csr".as_ptr()), "Loading the forward-pass kernel")
+                    .and_then(|_| check((self.cu.cuModuleGetFunction)(&mut fs, module, c"scatter".as_ptr()), "Loading the forward-pass kernel"));
+                if let Err(e) = r {
+                    (self.cu.cuModuleUnload)(module);
+                    return Err(e);
+                }
+                self.lk = Some(LogitsKernel {
+                    module,
+                    f_logits: fl,
+                    f_scatter: fs,
+                    w: DevBuf::default(),
+                    shadow: vec![],
+                    ptr: DevBuf::default(),
+                    idx: DevBuf::default(),
+                    val: DevBuf::default(),
+                    out: DevBuf::default(),
+                    s_idx: DevBuf::default(),
+                    s_val: DevBuf::default(),
+                });
+            }
+        }
+        let cu = &self.cu;
+        let k = self.lk.as_mut().unwrap();
+        unsafe {
+            // The weights: all of them when new (or when most changed), else only the changed ones through `scatter`.
+            if k.shadow.len() != w.len() {
+                Self::grow(cu, &mut k.w, w.len() * 8, "GPU memory for the weights")?;
+                check((cu.cuMemcpyHtoD_v2)(k.w.ptr, w.as_ptr() as *const c_void, w.len() * 8), "Copying the weights")?;
+                k.shadow = w.to_vec();
+            } else {
+                let changed: Vec<u32> = (0..w.len()).filter(|j| w[*j].to_bits() != k.shadow[*j].to_bits()).map(|j| j as u32).collect();
+                if changed.len() * 8 > w.len() {
+                    check((cu.cuMemcpyHtoD_v2)(k.w.ptr, w.as_ptr() as *const c_void, w.len() * 8), "Copying the weights")?;
+                    k.shadow.copy_from_slice(w);
+                } else if !changed.is_empty() {
+                    let vals: Vec<f64> = changed.iter().map(|j| w[*j as usize]).collect();
+                    Self::grow(cu, &mut k.s_idx, changed.len() * 4, "GPU memory")?;
+                    Self::grow(cu, &mut k.s_val, vals.len() * 8, "GPU memory")?;
+                    check((cu.cuMemcpyHtoD_v2)(k.s_idx.ptr, changed.as_ptr() as *const c_void, changed.len() * 4), "Copying the weights")?;
+                    check((cu.cuMemcpyHtoD_v2)(k.s_val.ptr, vals.as_ptr() as *const c_void, vals.len() * 8), "Copying the weights")?;
+                    let (mut a0, mut a1, mut a2, mut a3) = (k.s_idx.ptr, k.s_val.ptr, k.w.ptr, changed.len() as u32);
+                    let mut args = [&mut a0 as *mut _ as *mut c_void, &mut a1 as *mut _ as *mut c_void, &mut a2 as *mut _ as *mut c_void, &mut a3 as *mut _ as *mut c_void];
+                    Self::launch(cu, k.f_scatter, changed.len(), &mut args)?;
+                    for j in &changed {
+                        k.shadow[*j as usize] = w[*j as usize];
+                    }
+                }
+            }
+            // The rows, then the forward pass, then the results (all on the context's own stream, in order).
+            Self::grow(cu, &mut k.ptr, ptr.len() * 8, "GPU memory for the rows")?;
+            Self::grow(cu, &mut k.idx, idx.len() * 4, "GPU memory for the rows")?;
+            Self::grow(cu, &mut k.val, val.len() * 8, "GPU memory for the rows")?;
+            Self::grow(cu, &mut k.out, rows * 8, "GPU memory for the results")?;
+            check((cu.cuMemcpyHtoD_v2)(k.ptr.ptr, ptr.as_ptr() as *const c_void, ptr.len() * 8), "Copying the rows")?;
+            if !idx.is_empty() {
+                check((cu.cuMemcpyHtoD_v2)(k.idx.ptr, idx.as_ptr() as *const c_void, idx.len() * 4), "Copying the rows")?;
+                check((cu.cuMemcpyHtoD_v2)(k.val.ptr, val.as_ptr() as *const c_void, val.len() * 8), "Copying the rows")?;
+            }
+            let (mut a0, mut a1, mut a2, mut a3, mut a4, mut a5) = (k.ptr.ptr, k.idx.ptr, k.val.ptr, k.w.ptr, k.out.ptr, rows as u32);
+            let mut args = [
+                &mut a0 as *mut _ as *mut c_void,
+                &mut a1 as *mut _ as *mut c_void,
+                &mut a2 as *mut _ as *mut c_void,
+                &mut a3 as *mut _ as *mut c_void,
+                &mut a4 as *mut _ as *mut c_void,
+                &mut a5 as *mut _ as *mut c_void,
+            ];
+            Self::launch(cu, k.f_logits, rows, &mut args)?;
+            check((cu.cuMemcpyDtoH_v2)(out.as_mut_ptr() as *mut c_void, k.out.ptr, rows * 8), "The kernel or copying its results")?;
+        }
+        Ok(())
+    }
+
     /// Card memory taken, in MB.
     pub fn uploaded_mb(&self) -> f64 {
         ((self.uploaded + self.out_bytes) as f64 / 1_048_576.0).round()
@@ -406,6 +553,14 @@ impl Gpu {
                 (self.cu.cuMemFree_v2)(self.out_ptr);
             }
             (self.cu.cuMemFree_v2)(self.marks_ptr);
+            if let Some(k) = self.lk.take() {
+                for b in [k.w, k.ptr, k.idx, k.val, k.out, k.s_idx, k.s_val] {
+                    if b.bytes > 0 {
+                        (self.cu.cuMemFree_v2)(b.ptr);
+                    }
+                }
+                (self.cu.cuModuleUnload)(k.module);
+            }
             (self.cu.cuModuleUnload)(self.module);
             if reset {
                 (self.cu.cuDevicePrimaryCtxReset_v2)(self.dev);

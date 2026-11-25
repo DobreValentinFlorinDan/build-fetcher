@@ -36,7 +36,7 @@ impl Default for AppSettings {
             disk_budget_bytes: 2 * 1024 * 1024 * 1024,
             tier_a: vec![],
             tier_a_detected: vec![],
-            gpu: true,
+            gpu: false,
             learning: true,
             first_run_complete: false,
         }

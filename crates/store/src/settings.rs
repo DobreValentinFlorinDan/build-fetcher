@@ -39,6 +39,8 @@ pub struct Settings {
     pub disk_budget_bytes: u64,
     /// Tier A champions the user added (detected ones are added by the fetcher at run time, not saved here).
     pub tier_a: Vec<i64>,
+    /// Training, evaluation and similarity sums on an NVIDIA GPU. Off by default (the user's choice): the GPU path
+    /// is checked against the processor and falls back to it, but was not run on real hardware before 1.0.
     pub gpu: bool,
     pub learning: bool,
     /// "Name#TAG", as the user typed it.
@@ -58,7 +60,7 @@ impl Default for Settings {
             widen_to_diamond: true,
             disk_budget_bytes: DEFAULT_DISK_BUDGET,
             tier_a: vec![],
-            gpu: true,
+            gpu: false,
             learning: true,
             riot_id: None,
             puuid: None,
@@ -252,7 +254,7 @@ mod tests {
     #[test]
     fn invalid_fields_fall_back_alone() {
         let map: Map<String, Value> = serde_json::from_value(json!({
-            "regions": ["EUW1", "XX9"], "diskBudgetBytes": 10, "tierA": [39, 39], "gpu": false, "timelineSample": 2,
+            "regions": ["EUW1", "XX9"], "diskBudgetBytes": 10, "tierA": [39, 39], "gpu": true, "timelineSample": 2,
             "rankFloor": "mine", "riotId": "no-tag", "learning": "yes", "someOtherKey": 1
         }))
         .unwrap();
@@ -260,7 +262,7 @@ mod tests {
         assert_eq!(s.regions, Settings::default().regions);
         assert_eq!(s.disk_budget_bytes, DEFAULT_DISK_BUDGET);
         assert!(s.tier_a.is_empty());
-        assert!(!s.gpu, "valid fields are kept");
+        assert!(s.gpu, "valid fields are kept (true is not the default)");
         assert_eq!(s.timeline_sample, DEFAULT_TIMELINE_SAMPLE);
         assert_eq!(s.rank_floor, RankBand::MasterPlus);
         assert!(s.riot_id.is_none());

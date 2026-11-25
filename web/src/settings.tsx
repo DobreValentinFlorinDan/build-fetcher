@@ -140,7 +140,7 @@ export function SettingsPage() {
       <Card title="Learning">
         <div className="space-y-3">
           <Toggle on={s.learning} onChange={(learning) => patch({ learning })} label="Learn from new games" hint="Runs only while the PC is idle and League isn't open in a game or champ select." />
-          <Toggle on={s.gpu} onChange={(gpu) => patch({ gpu })} label="Use the GPU when available" hint="Checked against the CPU; any mismatch falls back to the CPU." />
+          <Toggle on={s.gpu} onChange={(gpu) => patch({ gpu })} label="Use the GPU when available" hint="NVIDIA only, off by default. Checked against the CPU; any mismatch falls back to the CPU. Takes effect when Build Fetcher restarts." />
         </div>
       </Card>
       {modelView && modelView.checkpoints.length > 0 && (

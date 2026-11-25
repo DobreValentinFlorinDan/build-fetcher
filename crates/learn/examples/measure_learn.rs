@@ -1,6 +1,6 @@
 //! Measures the learner on synthetic data (docs/MEASUREMENTS.md, "Learning"):
 //!
-//!   cargo run --release -p bf-learn --example measure -- [matches] [validation] [records per step] [threads]
+//!   cargo run --release -p bf-learn --example measure_learn -- [matches] [validation] [records per step] [threads]
 //!
 //! Prints held-out metrics of the champion-role baseline, step 1 and step 1+2, each update's time and memory, and
 //! recommendation latency, and whether the planted effects were recovered.

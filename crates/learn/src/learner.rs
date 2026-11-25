@@ -429,7 +429,7 @@ impl Learner {
             clock.observe_patch(p);
         }
         // About one record in CALIB_HOLDOUT (by match id, so the same data split the same way) is kept out of training
-        // to fit the per-window calibration; the validation sample stays untouched for the guardrail.
+        // to fit the calibration; the validation sample stays untouched for the guardrail.
         let (cal_records, train_records): (Vec<&MatchRecord>, Vec<&MatchRecord>) = records.iter().partition(|r| fnv(&r.match_id) % CALIB_HOLDOUT == 0);
         let fresh: Vec<Sample> = train_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
         let cal: Vec<Sample> = cal_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
@@ -488,13 +488,15 @@ impl Learner {
             None => {
                 let v = self.commit_logistic(&mut st, &cand, &after, n_records as u64)?;
                 report.log.push(format!(
-                    "{v} logistic accepted over {what_before}: {} -> {}; {} records, {} examples (+{} replayed), {} mini-batches",
+                    "{v} logistic accepted over {what_before}: {} -> {}; {} records, {} examples (+{} replayed), {} mini-batches; calibration temperature {:.3} + {:.3} per 10 min",
                     fmt_metrics(&before),
                     fmt_metrics(&after),
                     n_records,
                     fresh_n,
                     k,
-                    batches
+                    batches,
+                    cand.calib[0],
+                    cand.calib[1]
                 ));
                 step.version = Some(v.clone());
                 st.logistic = Some((v, Arc::new(cand)));

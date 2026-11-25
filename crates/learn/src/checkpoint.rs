@@ -125,10 +125,8 @@ pub fn encode_logistic(m: &LogisticModel) -> Vec<u8> {
         b.push(*r);
         put_u64(&mut b, *n);
     }
-    for [a, c] in m.calib {
-        put_f64(&mut b, a);
-        put_f64(&mut b, c);
-    }
+    put_f64(&mut b, m.calib[0]);
+    put_f64(&mut b, m.calib[1]);
     let nz: Vec<usize> = (0..DIM).filter(|j| m.w[*j] != 0.0 || m.m[*j] != 0.0 || m.v[*j] != 0.0).collect();
     put_u32(&mut b, nz.len() as u32);
     for j in nz {
@@ -155,9 +153,7 @@ pub fn decode_logistic(b: &[u8]) -> Result<LogisticModel> {
         m.pair_samples.insert((c, role), r.u64()?);
     }
     if version >= 2 {
-        for w in m.calib.iter_mut() {
-            *w = [r.f64()?, r.f64()?];
-        }
+        m.calib = [r.f64()?, r.f64()?];
     }
     for _ in 0..r.u32()? {
         let j = r.u32()? as usize;
@@ -309,7 +305,7 @@ mod tests {
         m.v[DIM - 1] = 3.5;
         m.t = 9;
         m.pair_samples.insert((39, 0), 12);
-        m.calib[2] = [0.8125, -0.0625];
+        m.calib = [0.8125, 0.0625];
         assert_eq!(decode_logistic(&encode_logistic(&m)).unwrap(), m);
         let n = SharedNet::new(1);
         assert_eq!(decode_nn(&encode_nn(&n)).unwrap(), n);

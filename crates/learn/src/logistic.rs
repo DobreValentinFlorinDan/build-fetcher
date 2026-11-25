@@ -155,16 +155,11 @@ pub struct TrainOptions {
     pub epochs: usize,
     /// Epochs of the very first update (no model yet): it has to beat the baseline from one batch of records.
     pub cold_epochs: usize,
-    /// Learning-rate multiplier for the game-state coefficients and the bias (the first `RESERVED` slots). Adam moves
-    /// a weight by about one learning rate per step, so at the sparse features' rate these few weights, which every
-    /// example informs, can't reach a strong late-game state effect within one update; the calibration then corrects
-    /// what the faster rate over- or undershoots.
-    pub dense_lr_scale: f64,
 }
 
 impl Default for TrainOptions {
     fn default() -> Self {
-        TrainOptions { learning_rate: 0.003, beta1: 0.9, beta2: 0.999, l2_global: 1e-2, l2_pair: 3e-2, batch: 512, epochs: 2, cold_epochs: 6, dense_lr_scale: 10.0 }
+        TrainOptions { learning_rate: 0.003, beta1: 0.9, beta2: 0.999, l2_global: 1e-2, l2_pair: 3e-2, batch: 512, epochs: 2, cold_epochs: 6 }
     }
 }
 
@@ -178,17 +173,21 @@ pub struct LogisticModel {
     pub t: u64,
     /// Training examples seen per (champion, role index).
     pub pair_samples: BTreeMap<(i64, u8), u64>,
-    /// Post-hoc calibration per 10-minute window (`features::window_of`): the served logit is `a * z + b` of the raw
-    /// one. Fitted after training on records held out from it (`fit_calibration`), never on the validation sample.
-    /// Why: one update's mini-batches move the few game-state weights too little or too much for how informative the
-    /// state is late in a game, which leaves the model under- or over-confident per window; a two-number correction
-    /// per window fixes either without touching what the weights rank.
-    pub calib: [[f64; 2]; WINDOWS],
+    /// Post-hoc calibration: the served logit is `(a0 + a1 * t) * z` of the raw one, a temperature that varies linearly
+    /// with game time (`t` = minutes / 10, at most 4). Fitted after training on records held out from it
+    /// (`fit_calibration`), never on the validation sample. Why: one update's mini-batches can move the few game-state
+    /// weights too little or too much for how informative the state is at each point of a game, which leaves the
+    /// model under- or over-confident; seen on synthetic data, the right temperature rises with game time (0.9 to 1.35
+    /// on one set, 1.7 to 2.8 on another). A temperature never changes what the weights rank.
+    pub calib: [f64; 2],
 }
 
-/// Calibration windows (0-10, 10-20, 20-30, 30+ minutes).
-pub const WINDOWS: usize = 4;
-pub const IDENTITY_CALIB: [[f64; 2]; WINDOWS] = [[1.0, 0.0]; WINDOWS];
+/// No calibration: a temperature of 1 at every minute.
+pub const IDENTITY_CALIB: [f64; 2] = [1.0, 0.0];
+/// Game time in the temperature, in tens of minutes, capped where the examples stop (minute 40).
+fn calib_time(minute: f64) -> f64 {
+    (minute / 10.0).clamp(0.0, 4.0)
+}
 
 impl Default for LogisticModel {
     fn default() -> Self {
@@ -196,11 +195,28 @@ impl Default for LogisticModel {
     }
 }
 
-/// How strongly a refit is pulled toward the calibration in force (in examples' worth of evidence): one small update
-/// can't swing it on noise.
-const CALIB_PRIOR: f64 = 400.0;
-/// A window with fewer held-out examples than this keeps its calibration.
-const CALIB_MIN: usize = 200;
+/// A window's temperature changes only when the new fit differs from the one in force by more than this many standard
+/// Fewer held-out matches than this: the calibration in force is kept. A cluster-robust covariance needs a few hundred
+/// clusters before its own uncertainty is small; with about 200 a significant-looking line still misjudged the late
+/// game on synthetic data. An update of 2,000 records holds out about 285.
+const CALIB_MIN_GAMES: usize = 250;
+/// The Wald statistic a change of the temperature line must exceed: the 95% point of χ² with 2 degrees of freedom.
+const CALIB_WALD: f64 = 5.991;
+
+fn inverse2(m: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
+    let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    [[m[1][1] / det, -m[0][1] / det], [-m[1][0] / det, m[0][0] / det]]
+}
+
+fn mul2(a: [[f64; 2]; 2], b: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
+    let mut out = [[0.0; 2]; 2];
+    for i in 0..2 {
+        for j in 0..2 {
+            out[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j];
+        }
+    }
+    out
+}
 
 /// Stops training between mini-batches when it returns true.
 pub type StopCheck<'a> = &'a (dyn Fn() -> bool + Sync);
@@ -223,62 +239,93 @@ impl LogisticModel {
     }
 
     pub fn calibrated(&self, z: f64, minute: f64) -> f64 {
-        let [a, b] = self.calib[crate::features::window_of(minute)];
-        a * z + b
+        (self.calib[0] + self.calib[1] * calib_time(minute)) * z
     }
 
-    /// Refits the per-window calibration on held-out examples: weighted logistic regression of the label on the raw
-    /// logit, two parameters per window, by Newton's method, with a Gaussian prior centred on the calibration in force
-    /// (`CALIB_PRIOR` examples' worth). Sequential sums in example order: deterministic.
+    /// Refits the calibration on held-out examples: the temperature line (a0, a1) that maximises their weighted log
+    /// likelihood, by Newton's method from the line in force. It replaces the line in force only when a Wald test
+    /// with a cluster-robust covariance says the two differ (`CALIB_WALD`, 95% for two parameters): no move on noise.
+    ///
+    /// - Matches are the clusters: the examples of one match (10 players at several minutes, both teams) share one
+    ///   outcome, so they are one piece of evidence, not dozens. Counting them one by one overfitted small windows
+    ///   on synthetic data (a = 1.27 to 1.6 from 50-100 matches of a model already calibrated).
+    /// - One line over the whole game, not a temperature per window: a late window often has too few matches to fit
+    ///   alone, and one temperature pooled over every window made some worse (they need different corrections).
+    /// - No intercept: every match gives examples for both teams, so the true intercept is zero by symmetry.
+    ///
+    /// Sequential sums in example order: deterministic.
     pub fn fit_calibration(&mut self, held_out: &[Sample], weights: &[f64], backend: &dyn Backend) {
         let refs: Vec<&Situation> = held_out.iter().map(|s| &s.situation).collect();
         let mut z = vec![0.0; refs.len()];
         for (c, o) in refs.chunks(EVAL_ROWS).zip(z.chunks_mut(EVAL_ROWS)) {
             backend.logits(&to_csr(c), &self.w, o);
         }
-        for win in 0..WINDOWS {
-            let idx: Vec<usize> = (0..held_out.len()).filter(|i| held_out[*i].window() == win).collect();
-            if idx.len() < CALIB_MIN {
-                continue;
-            }
-            let total: f64 = idx.iter().map(|i| weights[*i]).sum();
-            if total <= 0.0 {
-                continue;
-            }
-            // Weights normalised to the number of examples, so the prior means the same at any weighting.
-            let norm = idx.len() as f64 / total;
-            let prior = self.calib[win];
-            let (mut a, mut b) = (prior[0], prior[1]);
-            for _ in 0..50 {
-                // Gradient and Hessian of the negative log posterior.
-                let (mut ga, mut gb, mut haa, mut hab, mut hbb) = (CALIB_PRIOR * (a - prior[0]), CALIB_PRIOR * (b - prior[1]), CALIB_PRIOR, 0.0, CALIB_PRIOR);
-                for &i in &idx {
-                    let w = weights[i] * norm;
-                    let p = sigmoid(a * z[i] + b);
-                    let r = w * (p - held_out[i].label());
-                    let h = w * p * (1.0 - p);
-                    ga += r * z[i];
-                    gb += r;
-                    haa += h * z[i] * z[i];
-                    hab += h * z[i];
-                    hbb += h;
-                }
-                let det = haa * hbb - hab * hab;
-                if !(det.is_finite() && det > 0.0) {
-                    break;
-                }
-                let da = (hbb * ga - hab * gb) / det;
-                let db = (haa * gb - hab * ga) / det;
-                a -= da;
-                b -= db;
-                if da.abs() < 1e-10 && db.abs() < 1e-10 {
-                    break;
+        self.fit_calibration_on(held_out, weights, &z);
+    }
+
+    /// `fit_calibration` given the raw logits `z` of the held-out examples.
+    pub(crate) fn fit_calibration_on(&mut self, held_out: &[Sample], weights: &[f64], z: &[f64]) {
+        // The two inputs of the line for each example: z and z * t.
+        let x: Vec<[f64; 2]> = held_out.iter().zip(z).map(|(s, z)| [*z, *z * calib_time(s.situation.state.minute)]).collect();
+        let games = held_out.iter().map(|s| s.game).collect::<std::collections::BTreeSet<u64>>().len();
+        if games < CALIB_MIN_GAMES {
+            return;
+        }
+        let old = self.calib;
+        let mut th = old;
+        let mut hess = [[0.0; 2]; 2];
+        for _ in 0..50 {
+            let (mut g, mut h) = ([0.0; 2], [[0.0; 2]; 2]);
+            for (i, s) in held_out.iter().enumerate() {
+                let p = sigmoid(th[0] * x[i][0] + th[1] * x[i][1]);
+                let (r, c) = (weights[i] * (p - s.label()), weights[i] * p * (1.0 - p));
+                for j in 0..2 {
+                    g[j] += r * x[i][j];
+                    for k in 0..2 {
+                        h[j][k] += c * x[i][j] * x[i][k];
+                    }
                 }
             }
-            // A negative slope would reverse the model's ranking: keep what is in force instead.
-            if a.is_finite() && b.is_finite() && a > 0.0 {
-                self.calib[win] = [a, b];
+            let det = h[0][0] * h[1][1] - h[0][1] * h[1][0];
+            if !(det.is_finite() && det > 0.0) {
+                return;
             }
+            let d0 = (h[1][1] * g[0] - h[0][1] * g[1]) / det;
+            let d1 = (h[0][0] * g[1] - h[1][0] * g[0]) / det;
+            th = [th[0] - d0, th[1] - d1];
+            hess = h;
+            if d0.abs() < 1e-12 && d1.abs() < 1e-12 {
+                break;
+            }
+        }
+        // The temperature must stay positive over the whole game, or the ranking would flip.
+        if !(th[0].is_finite() && th[1].is_finite() && th[0] > 0.0 && th[0] + 4.0 * th[1] > 0.0) {
+            return;
+        }
+        // Cluster-robust covariance H⁻¹ (Σ_match s sᵀ) H⁻¹, then the Wald statistic of the change.
+        let mut per_game: BTreeMap<u64, [f64; 2]> = BTreeMap::new();
+        for (i, s) in held_out.iter().enumerate() {
+            let p = sigmoid(th[0] * x[i][0] + th[1] * x[i][1]);
+            let r = weights[i] * (p - s.label());
+            let e = per_game.entry(s.game).or_insert([0.0; 2]);
+            e[0] += r * x[i][0];
+            e[1] += r * x[i][1];
+        }
+        let mut meat = [[0.0; 2]; 2];
+        for sc in per_game.values() {
+            for j in 0..2 {
+                for k in 0..2 {
+                    meat[j][k] += sc[j] * sc[k];
+                }
+            }
+        }
+        let inv = inverse2(hess);
+        let cov = mul2(mul2(inv, meat), inv);
+        let covi = inverse2(cov);
+        let d = [th[0] - old[0], th[1] - old[1]];
+        let wald = d[0] * (covi[0][0] * d[0] + covi[0][1] * d[1]) + d[1] * (covi[1][0] * d[0] + covi[1][1] * d[1]);
+        if wald.is_finite() && wald > CALIB_WALD {
+            self.calib = th;
         }
     }
 
@@ -354,8 +401,7 @@ impl LogisticModel {
                     self.v[j] = o.beta2 * self.v[j] + (1.0 - o.beta2) * g * g;
                     let mh = self.m[j] / b1t;
                     let vh = self.v[j] / b2t;
-                    let lr = if j < RESERVED { o.learning_rate * o.dense_lr_scale } else { o.learning_rate };
-                    self.w[j] -= lr * mh / (vh.sqrt() + 1e-8);
+                    self.w[j] -= o.learning_rate * mh / (vh.sqrt() + 1e-8);
                     grad[j] = 0.0;
                     mark[j] = false;
                 }
@@ -390,4 +436,58 @@ pub fn to_csr(xs: &[&Situation]) -> Csr {
         csr.ptr.extend(p.ptr[1..].iter().map(|x| x + at));
     }
     csr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::features::{GameState, Rng};
+
+    /// Held-out examples whose labels follow σ(a(t)·z) for a known temperature line; two teams per match, mirrored.
+    fn held_out(n_games: usize, truth: [f64; 2], seed: u64) -> (Vec<Sample>, Vec<f64>) {
+        let mut r = Rng(seed);
+        let (mut out, mut z) = (vec![], vec![]);
+        for g in 0..n_games {
+            for minute in [0.0, 8.0, 14.0, 20.0, 26.0, 32.0] {
+                let zi = r.normal() * (0.5 + minute / 15.0);
+                let p = sigmoid((truth[0] + truth[1] * calib_time(minute)) * zi);
+                let won = r.uniform() < p;
+                for (team, w, zz) in [(0u64, won, zi), (1, !won, -zi)] {
+                    let situation = Situation { state: GameState { minute, ..Default::default() }, ..Default::default() };
+                    out.push(Sample { situation, won: w, is_me: false, version: None, rank: None, group: g as u64 * 2 + team, game: g as u64 });
+                    z.push(zz);
+                }
+            }
+        }
+        (out, z)
+    }
+
+    #[test]
+    fn calibration_recovers_a_temperature_line_and_ignores_noise() {
+        // Under-confident late (the model's logits are too small): found and applied.
+        // The two parameters trade off (the start of a game, with small logits, says little), so the check is the
+        // temperature the line gives mid-game.
+        let (s, z) = held_out(2000, [1.4, 0.5], 7);
+        let w = vec![1.0; s.len()];
+        let mut m = LogisticModel::default();
+        m.fit_calibration_on(&s, &w, &z);
+        for minute in [14.0, 26.0] {
+            let (got, want) = (m.calibrated(1.0, minute), 1.4 + 0.5 * minute / 10.0);
+            assert!((got - want).abs() < 0.1 * want, "{minute} min: {got} vs {want} ({:?})", m.calib);
+        }
+        // Already calibrated: no significant change, so the identity stays.
+        let (s, z) = held_out(2000, IDENTITY_CALIB, 8);
+        let mut m = LogisticModel::default();
+        m.fit_calibration_on(&s, &w, &z);
+        assert_eq!(m.calib, IDENTITY_CALIB);
+        // Too few matches: nothing is fitted, whatever the data say.
+        let (s, z) = held_out(CALIB_MIN_GAMES - 1, [3.0, 1.0], 9);
+        let mut m = LogisticModel::default();
+        m.fit_calibration_on(&s, &vec![1.0; s.len()], &z);
+        assert_eq!(m.calib, IDENTITY_CALIB);
+        // The served logit uses it: (a0 + a1 * t) * z, t capped at 40 minutes.
+        let m = LogisticModel { calib: [1.5, 0.25], ..Default::default() };
+        assert_eq!(m.calibrated(2.0, 20.0), 4.0);
+        assert_eq!(m.calibrated(2.0, 60.0), m.calibrated(2.0, 40.0));
+    }
 }

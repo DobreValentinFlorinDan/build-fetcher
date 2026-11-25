@@ -61,9 +61,9 @@ timeline, 3% with one defect for the filters, Irelia featured in 5% of games and
 ### Commands
 
 ```
-cargo build --release -p bf-store --example measure
-time target/release/examples/measure 50000 7 0.1        # batches of 1000 games per transaction
-target/release/examples/measure 50000 7 0.1 50          # batches of 50 (closer to the fetcher, which ingests one game at a time)
+cargo build --release -p bf-store --example measure_store
+time target/release/examples/measure_store 50000 7 0.1        # batches of 1000 games per transaction
+target/release/examples/measure_store 50000 7 0.1 50          # batches of 50 (closer to the fetcher, which ingests one game at a time)
 cargo test -p bf-core --lib riot::client -- --nocapture # request counts under the shared-key budget (simulated Riot)
 cargo test -p bf-store --test scheduler -- --nocapture  # the whole fetcher on the simulated Riot
 ```
@@ -150,10 +150,10 @@ agents were compiling at the same time, so timings are indicative to about ±30%
 ### Command
 
 ```
-cargo run --release -p bf-learn --example measure -- 20000 2000 2000      # matches, validation matches, records per update
-cargo run --release -p bf-learn --example measure -- 6000 1000 2000 1     # the same on 6,000 matches with 1 thread
-cargo run --release -p bf-learn --example measure -- 6000 1000 2000 4     #                                 4 threads
-cargo run --release -p bf-learn --example measure -- 6000 1000 500 4      # smaller updates (500 records)
+cargo run --release -p bf-learn --example measure_learn -- 20000 2000 2000      # matches, validation matches, records per update
+cargo run --release -p bf-learn --example measure_learn -- 6000 1000 2000 1     # the same on 6,000 matches with 1 thread
+cargo run --release -p bf-learn --example measure_learn -- 6000 1000 2000 4     #                                 4 threads
+cargo run --release -p bf-learn --example measure_learn -- 6000 1000 500 4      # smaller updates (500 records)
 ```
 
 ### Synthetic set

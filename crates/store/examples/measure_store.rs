@@ -1,6 +1,6 @@
 //! Store measurements on a synthetic set (docs/MEASUREMENTS.md, "Store").
 //!
-//!   cargo run --release -p bf-store --example measure -- [games=50000] [seed=7] [timeline_share=0.1] [batch=1000]
+//!   cargo run --release -p bf-store --example measure_store -- [games=50000] [seed=7] [timeline_share=0.1] [batch=1000]
 //!
 //! Generates games from the seed with `bf_core::testkit::Synth` (3 patches, 3 platforms, 3% defective games, Irelia
 //! featured in 5% and tier A), ingests them in batches (default 1000) into a fresh database in a temporary folder, then

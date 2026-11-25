@@ -26,7 +26,8 @@ pub trait Baseline: Send + Sync {
 
 #[derive(Clone, Debug)]
 pub struct StoreOptions {
-    /// Size of the held-out validation sample.
+    /// Size of the held-out validation sample: 4,000 timeline games (about 6 MB measured on synthetic games; real timelines are bigger). Doubled from 2,000 at the user's
+    /// choice: the guardrail rejects any update that makes a metric worse, and a bigger sample makes "worse" less noisy.
     pub validation_cap: usize,
     /// One timeline game in this many (by match id hash) goes to validation while it has room.
     pub validation_one_in: u64,
@@ -42,7 +43,7 @@ pub struct StoreOptions {
 
 impl Default for StoreOptions {
     fn default() -> Self {
-        StoreOptions { validation_cap: 2000, validation_one_in: 10, dictionary_after: 64, thin_games: 300, player_champs_per_pair: 40, baseline_prior_games: 20.0 }
+        StoreOptions { validation_cap: 4000, validation_one_in: 10, dictionary_after: 64, thin_games: 300, player_champs_per_pair: 40, baseline_prior_games: 20.0 }
     }
 }
 

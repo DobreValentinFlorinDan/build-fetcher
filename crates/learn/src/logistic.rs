@@ -155,11 +155,16 @@ pub struct TrainOptions {
     pub epochs: usize,
     /// Epochs of the very first update (no model yet): it has to beat the baseline from one batch of records.
     pub cold_epochs: usize,
+    /// Learning-rate multiplier for the game-state coefficients and the bias (the first `RESERVED` slots). Adam moves
+    /// a weight by about one learning rate per step, so at the sparse features' rate these few weights, which every
+    /// example informs, can't reach a strong late-game state effect within one update; the calibration then corrects
+    /// what the faster rate over- or undershoots.
+    pub dense_lr_scale: f64,
 }
 
 impl Default for TrainOptions {
     fn default() -> Self {
-        TrainOptions { learning_rate: 0.003, beta1: 0.9, beta2: 0.999, l2_global: 1e-2, l2_pair: 3e-2, batch: 512, epochs: 2, cold_epochs: 6 }
+        TrainOptions { learning_rate: 0.003, beta1: 0.9, beta2: 0.999, l2_global: 1e-2, l2_pair: 3e-2, batch: 512, epochs: 2, cold_epochs: 6, dense_lr_scale: 10.0 }
     }
 }
 
@@ -173,19 +178,41 @@ pub struct LogisticModel {
     pub t: u64,
     /// Training examples seen per (champion, role index).
     pub pair_samples: BTreeMap<(i64, u8), u64>,
+    /// Post-hoc calibration per 10-minute window (`features::window_of`): the served logit is `a * z + b` of the raw
+    /// one. Fitted after training on records held out from it (`fit_calibration`), never on the validation sample.
+    /// Why: one update's mini-batches move the few game-state weights too little or too much for how informative the
+    /// state is late in a game, which leaves the model under- or over-confident per window; a two-number correction
+    /// per window fixes either without touching what the weights rank.
+    pub calib: [[f64; 2]; WINDOWS],
 }
+
+/// Calibration windows (0-10, 10-20, 20-30, 30+ minutes).
+pub const WINDOWS: usize = 4;
+pub const IDENTITY_CALIB: [[f64; 2]; WINDOWS] = [[1.0, 0.0]; WINDOWS];
 
 impl Default for LogisticModel {
     fn default() -> Self {
-        LogisticModel { w: vec![0.0; DIM], m: vec![0.0; DIM], v: vec![0.0; DIM], t: 0, pair_samples: BTreeMap::new() }
+        LogisticModel { w: vec![0.0; DIM], m: vec![0.0; DIM], v: vec![0.0; DIM], t: 0, pair_samples: BTreeMap::new(), calib: IDENTITY_CALIB }
     }
 }
+
+/// How strongly a refit is pulled toward the calibration in force (in examples' worth of evidence): one small update
+/// can't swing it on noise.
+const CALIB_PRIOR: f64 = 400.0;
+/// A window with fewer held-out examples than this keeps its calibration.
+const CALIB_MIN: usize = 200;
 
 /// Stops training between mini-batches when it returns true.
 pub type StopCheck<'a> = &'a (dyn Fn() -> bool + Sync);
 
 impl LogisticModel {
+    /// The served (calibrated) logit.
     pub fn logit(&self, s: &Situation) -> f64 {
+        self.calibrated(self.raw_logit(s), s.state.minute)
+    }
+
+    /// The weights' own logit (what training optimises).
+    pub fn raw_logit(&self, s: &Situation) -> f64 {
         let mut f = Vec::with_capacity(96);
         featurize(s, &mut f);
         let mut z = 0.0;
@@ -193,6 +220,66 @@ impl LogisticModel {
             z += self.w[*i as usize] * v;
         }
         z
+    }
+
+    pub fn calibrated(&self, z: f64, minute: f64) -> f64 {
+        let [a, b] = self.calib[crate::features::window_of(minute)];
+        a * z + b
+    }
+
+    /// Refits the per-window calibration on held-out examples: weighted logistic regression of the label on the raw
+    /// logit, two parameters per window, by Newton's method, with a Gaussian prior centred on the calibration in force
+    /// (`CALIB_PRIOR` examples' worth). Sequential sums in example order: deterministic.
+    pub fn fit_calibration(&mut self, held_out: &[Sample], weights: &[f64], backend: &dyn Backend) {
+        let refs: Vec<&Situation> = held_out.iter().map(|s| &s.situation).collect();
+        let mut z = vec![0.0; refs.len()];
+        for (c, o) in refs.chunks(EVAL_ROWS).zip(z.chunks_mut(EVAL_ROWS)) {
+            backend.logits(&to_csr(c), &self.w, o);
+        }
+        for win in 0..WINDOWS {
+            let idx: Vec<usize> = (0..held_out.len()).filter(|i| held_out[*i].window() == win).collect();
+            if idx.len() < CALIB_MIN {
+                continue;
+            }
+            let total: f64 = idx.iter().map(|i| weights[*i]).sum();
+            if total <= 0.0 {
+                continue;
+            }
+            // Weights normalised to the number of examples, so the prior means the same at any weighting.
+            let norm = idx.len() as f64 / total;
+            let prior = self.calib[win];
+            let (mut a, mut b) = (prior[0], prior[1]);
+            for _ in 0..50 {
+                // Gradient and Hessian of the negative log posterior.
+                let (mut ga, mut gb, mut haa, mut hab, mut hbb) = (CALIB_PRIOR * (a - prior[0]), CALIB_PRIOR * (b - prior[1]), CALIB_PRIOR, 0.0, CALIB_PRIOR);
+                for &i in &idx {
+                    let w = weights[i] * norm;
+                    let p = sigmoid(a * z[i] + b);
+                    let r = w * (p - held_out[i].label());
+                    let h = w * p * (1.0 - p);
+                    ga += r * z[i];
+                    gb += r;
+                    haa += h * z[i] * z[i];
+                    hab += h * z[i];
+                    hbb += h;
+                }
+                let det = haa * hbb - hab * hab;
+                if !(det.is_finite() && det > 0.0) {
+                    break;
+                }
+                let da = (hbb * ga - hab * gb) / det;
+                let db = (haa * gb - hab * ga) / det;
+                a -= da;
+                b -= db;
+                if da.abs() < 1e-10 && db.abs() < 1e-10 {
+                    break;
+                }
+            }
+            // A negative slope would reverse the model's ranking: keep what is in force instead.
+            if a.is_finite() && b.is_finite() && a > 0.0 {
+                self.calib[win] = [a, b];
+            }
+        }
     }
 
     pub fn predict(&self, s: &Situation) -> f64 {
@@ -205,6 +292,9 @@ impl LogisticModel {
         let mut out = vec![0.0; xs.len()];
         for (c, o) in xs.chunks(EVAL_ROWS).zip(out.chunks_mut(EVAL_ROWS)) {
             backend.logits(&to_csr(c), &self.w, o);
+        }
+        for (z, s) in out.iter_mut().zip(xs) {
+            *z = self.calibrated(*z, s.state.minute);
         }
         out
     }
@@ -264,7 +354,8 @@ impl LogisticModel {
                     self.v[j] = o.beta2 * self.v[j] + (1.0 - o.beta2) * g * g;
                     let mh = self.m[j] / b1t;
                     let vh = self.v[j] / b2t;
-                    self.w[j] -= o.learning_rate * mh / (vh.sqrt() + 1e-8);
+                    let lr = if j < RESERVED { o.learning_rate * o.dense_lr_scale } else { o.learning_rate };
+                    self.w[j] -= lr * mh / (vh.sqrt() + 1e-8);
                     grad[j] = 0.0;
                     mark[j] = false;
                 }

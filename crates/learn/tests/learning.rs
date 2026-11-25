@@ -436,12 +436,56 @@ fn live_advice_gives_several_open_options_with_evidence() {
     // A magic-heavy enemy: magic resist is among the counters, with the reason.
     assert!(a.counters.iter().any(|(o, why)| why.contains("magic") && data().item(o.option.item_ids()[0]).unwrap().magic_resist > 0.0), "{:?}", a.counters);
     assert!(a.notes.iter().any(|n| n.contains("choice is yours")));
+    // 1.2.0: every option has its price from here against the 1,400 gold, and the part to buy now when short.
+    for o in a.next_buys.iter().chain(a.counters.iter().map(|c| &c.0)) {
+        let id = o.option.item_ids()[0];
+        let b = a.buys.iter().find(|b| b.item == id).unwrap_or_else(|| panic!("no price for {}", o.label));
+        let full = data().item(id).unwrap().gold_total as u32;
+        assert!(b.cost <= full && b.cost > 0, "{} costs {} of {full}", o.label, b.cost);
+        assert_eq!(b.short, b.cost.saturating_sub(1400));
+        if b.short > 0 {
+            if let (Some(p), Some(c)) = (b.part, b.part_cost) {
+                assert!(c <= 1400 && !owned.contains(&p), "{}: part {p} at {c}", o.label);
+            }
+        } else {
+            assert!(b.part.is_none());
+        }
+    }
 
     // No data at all for this champion: still several options, flagged.
     // (Aatrox is in none of the synthetic pools.)
     let lone = LiveContext { draft: DraftContext { champion: 266, role: Some(Role::Top), ..Default::default() }, my_items: vec![3071], ..Default::default() };
     let a = rec.live(&lone).unwrap();
     assert!(a.next_buys.len() >= 2 && a.next_buys.iter().all(|o| o.thin && !o.option.item_ids().contains(&3071)), "{:?}", a.next_buys);
+}
+
+/// Lord Dominik's Regards is planted to pay off only against 7+ enemy armor items (1.2.0: the model sees enemy items).
+#[test]
+fn enemy_armor_moves_the_item_advice() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = Arc::new(generate(&data(), &SyntheticConfig { matches: 4000, validation: 600, seed: 11, armor_effect: true, ..Default::default() }));
+    let learner = Arc::new(Learner::open(dir.path(), data(), quick()).unwrap());
+    let r = learner.train_step(src.as_ref(), &Budget::records(4000)).unwrap();
+    assert_eq!(r.outcome, Outcome::Accepted, "{:#?}", r.log);
+    let rec = Recommender::new(src.clone(), Some(learner.clone()), data(), RecommendConfig { per_section: 20, ..Default::default() });
+    let draft = DraftContext {
+        champion: JINX,
+        role: Some(Role::Bottom),
+        allies: vec![(IRELIA, Some(Role::Top)), (64, Some(Role::Jungle)), (103, Some(Role::Middle)), (412, Some(Role::Utility))],
+        enemies: vec![(DARIUS, Some(Role::Top)), (60, Some(Role::Jungle)), (134, Some(Role::Middle)), (81, Some(Role::Bottom)), (117, Some(Role::Utility))],
+        patch: None,
+    };
+    let live = |enemy_items: Vec<(i64, Vec<i64>)>| LiveContext { draft: draft.clone(), game_time_s: 1800.0, my_items: vec![6672, 3031, 3094, 3006], enemy_items, my_gold: 3000.0, ..Default::default() };
+    let heavy = vec![(DARIUS, vec![3075, 3742, 3047]), (60, vec![6333, 3026, 3047]), (117, vec![3109, 3190, 3047])];
+    let light = vec![(134, vec![6655, 3089, 3020]), (117, vec![6617, 3158]), (60, vec![4645])];
+    let wpa = |a: &LiveAdvice| a.next_buys.iter().find(|o| o.option.item_ids()[0] == LDR).map(|o| o.wpa).unwrap_or_else(|| panic!("no LDR in {:#?}", a.next_buys));
+    let (h, l) = (rec.live(&live(heavy)).unwrap(), rec.live(&live(light)).unwrap());
+    eprintln!("LDR win chance added: {:.4} against 9 armor items, {:.4} against none", wpa(&h), wpa(&l));
+    // The reason says what stands out in the enemy's items (Lord Dominik's has armor penetration).
+    let reason = |a: &LiveAdvice| a.buys.iter().find(|b| b.item == LDR).and_then(|b| b.reason.clone());
+    assert_eq!(reason(&h).as_deref(), Some("9 enemy armor items"));
+    assert_eq!(reason(&l), None);
+    assert!(wpa(&h) > wpa(&l) + 0.02, "LDR against armor {} vs without {}", wpa(&h), wpa(&l));
 }
 
 #[test]
@@ -584,4 +628,100 @@ fn options_rank_on_their_own_role_and_thin_ones_never_lead() {
         assert!(l.games <= 5, "{l:?}");
         assert!(l.wpa.abs() < 0.01, "a few lucky games barely move the estimate: {l:?}");
     }
+}
+
+// ------------------------------------------------------------------------------------------------ continuous learning
+
+fn idle() -> Arc<dyn Fn() -> Activity + Send + Sync> {
+    Arc::new(|| Activity::Idle)
+}
+
+fn more(src: &mut SyntheticSource, matches: usize, seed: u64, flip: bool) {
+    src.append(generate(&data(), &SyntheticConfig { matches, validation: 0, seed, flip_labels: flip, ..Default::default() }), &data());
+}
+
+fn active_logistic(l: &Learner) -> String {
+    l.status().checkpoints.iter().find(|c| c.active && c.kind == "logistic").map(|c| c.version.clone()).unwrap_or_default()
+}
+
+/// 1.2.0: after the first model, games are learnt as they arrive (`absorb`), and every 150 the draft is checked
+/// (`check`): accepted drafts are served and saved, the store's cursor follows, and a restart learns again only the
+/// games since the last accepted model.
+#[test]
+fn continuous_learning_learns_each_batch_and_checks_every_150_games() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = source(2000, 21);
+    let l = Learner::open(dir.path(), data(), quick()).unwrap();
+    // Before a model exists, absorb leaves it to train_step.
+    assert_eq!(l.absorb(&src, 300, None, idle()).unwrap().outcome, Outcome::Waiting);
+    assert_eq!(l.train_step(&src, &Budget::records(2000)).unwrap().outcome, Outcome::Accepted);
+    let v1 = active_logistic(&l);
+    let policy = CheckPolicy { max_wait: None, ..Default::default() };
+
+    // Nothing new: nothing to learn, no check due.
+    assert_eq!(l.absorb(&src, 300, None, idle()).unwrap().outcome, Outcome::NoData);
+    assert!(l.check(&src, &policy).unwrap().is_none());
+    // In champ select or a game, nothing runs; while the PC is merely in use, it does.
+    more(&mut src, 60, 22, false);
+    assert_eq!(l.absorb(&src, 300, None, Arc::new(|| Activity::InGame)).unwrap().outcome, Outcome::NotIdle);
+    let a = l.absorb(&src, 300, None, Arc::new(|| Activity::Busy)).unwrap();
+    assert_eq!((a.outcome, a.records, a.since_check), (Outcome::Learned, 60, 60));
+    assert!(a.samples > 0 && a.replayed > 0);
+    assert!(l.check(&src, &policy).unwrap().is_none(), "60 games: no check yet");
+    assert!(l.status().log[0].starts_with("Learning game by game: 60 new games"), "{:?}", l.status().log);
+    // The draft isn't served before a check.
+    assert_eq!(active_logistic(&l), v1);
+
+    // 100 more (160 in all): a check, on the held-out sample.
+    more(&mut src, 100, 23, false);
+    assert_eq!(l.absorb(&src, 300, None, idle()).unwrap().since_check, 160);
+    let r = l.check(&src, &policy).unwrap().expect("a check is due");
+    assert!(matches!(r.outcome, Outcome::Accepted | Outcome::Rejected), "{:?}", r.outcome);
+    assert!(r.validation_samples > 0 && !r.steps.is_empty());
+    let accepted = r.outcome == Outcome::Accepted;
+    if accepted {
+        assert_ne!(active_logistic(&l), v1, "{:#?}", r.log);
+    } else {
+        assert_eq!(active_logistic(&l), v1, "{:#?}", r.log);
+    }
+    assert!(l.check(&src, &policy).unwrap().is_none(), "the next check waits for 150 more");
+    let served = active_logistic(&l);
+    drop(l);
+
+    // A restart: the model in force is back; the draft is not, and the games since the last accepted model are
+    // learnt again (none when the check accepted them, all 160 when it didn't).
+    let l = Learner::open(dir.path(), data(), quick()).unwrap();
+    assert_eq!(active_logistic(&l), served);
+    let a = l.absorb(&src, 300, None, idle()).unwrap();
+    if accepted {
+        assert_eq!(a.outcome, Outcome::NoData);
+    } else {
+        assert_eq!((a.outcome, a.records), (Outcome::Learned, 160));
+    }
+}
+
+/// A draft that keeps failing its checks (poisoned games: every winner flipped) is never served, and after
+/// `max_rejections` checks in a row it starts again from the model in force, its games counted as read.
+#[test]
+fn continuous_learning_never_serves_a_worse_draft_and_resets_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = source(2000, 31);
+    let l = Learner::open(dir.path(), data(), quick()).unwrap();
+    assert_eq!(l.train_step(&src, &Budget::records(2000)).unwrap().outcome, Outcome::Accepted);
+    let v1 = active_logistic(&l);
+    let policy = CheckPolicy { every: 200, max_wait: None, max_rejections: 2, ..Default::default() };
+    for (k, seed) in [32u64, 33].into_iter().enumerate() {
+        more(&mut src, 400, seed, true);
+        assert_eq!(l.absorb(&src, 1000, None, idle()).unwrap().outcome, Outcome::Learned);
+        let r = l.check(&src, &policy).unwrap().unwrap();
+        assert_eq!(r.outcome, Outcome::Rejected, "{:#?}", r.log);
+        assert_eq!(active_logistic(&l), v1);
+        let reset = r.log.iter().any(|x| x.contains("starts again from the model in force"));
+        assert_eq!(reset, k == 1, "{:#?}", r.log);
+    }
+    // Reset: the poisoned games count as read, and the next draft starts from v1.
+    assert_eq!(l.absorb(&src, 1000, None, idle()).unwrap().outcome, Outcome::NoData);
+    drop(l);
+    let l = Learner::open(dir.path(), data(), quick()).unwrap();
+    assert_eq!(l.absorb(&src, 1000, None, idle()).unwrap().outcome, Outcome::NoData, "the cursor was saved");
 }

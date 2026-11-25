@@ -622,6 +622,27 @@ pub struct LiveAdvice {
     pub counters: Vec<(RankedOption, String)>,
     pub predicted_win: Option<f64>,
     pub notes: Vec<String>,
+    /// 1.2.0: for each item in `next_buys` and `counters`, what it costs from here with the user's gold, and why it
+    /// fits this game.
+    #[serde(default)]
+    pub buys: Vec<BuyNote>,
+}
+
+/// An item's price from where the user stands. Only what the player can see goes in: their own gold and items, and
+/// the enemy's items as the scoreboard shows them (never the enemy's gold, which the game doesn't show).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuyNote {
+    pub item: i64,
+    /// Gold still to pay for the whole item, counting the components already owned.
+    pub cost: u32,
+    /// Gold missing for it (0: it can be bought now).
+    pub short: u32,
+    /// When it can't be bought whole: the most expensive part of its recipe the gold covers now, and that part's price.
+    pub part: Option<i64>,
+    pub part_cost: Option<u32>,
+    /// Why it fits this game, from the enemy's items ("4 enemy armor items"), when something stands out.
+    pub reason: Option<String>,
 }
 
 /// What the server asks for a build. The learner implements it.

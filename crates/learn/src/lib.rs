@@ -33,5 +33,5 @@ pub mod nn;
 pub mod recommend;
 pub mod synthetic;
 
-pub use learner::{Budget, LearnConfig, Learner, Outcome, Served, StepReport, UpdateReport};
+pub use learner::{AbsorbReport, Budget, CheckPolicy, ContinuousOptions, LearnConfig, Learner, Outcome, Served, StepReport, UpdateReport};
 pub use recommend::{RecommendConfig, Recommender};

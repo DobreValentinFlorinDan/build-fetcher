@@ -427,3 +427,50 @@ agreement, and write each change in the hand-over section of this file.
       The same holds for live next buys.
     - Options show their own role's games; the dashboard shows the played win rate and the estimate, labelled "est.".
   - Regression test: `options_rank_on_their_own_role_and_thin_ones_never_lead` (fails on 1.1.0).
+- (lead, 2026-11-25, 1.2.0) **The enemy's items, continuous learning, gold in the overlay.** Brief:
+  `docs/plans/1.2.0.md`.
+  - **Riot policy, read on 2026-11-25** (portal reachable this time):
+    - The general policies (May 29, 2025) say products "should not remove game decisions, but may highlight decisions
+      that are important and give multiple choices".
+    - The League game policy lists as unapproved: "Apps that dictate player decisions", and "Products may not provide
+      any game-session-specific information that would be previously unknown to the player".
+    - **So:**
+      - the overlay uses only what the player sees: their gold and items, and every player's items from the Live
+        Client (the scoreboard);
+      - the enemy's gold is never shown or estimated;
+      - three options, best first, each with a reason.
+    - The League page's approved list names "Game overlays that provide static data that is available prior to the
+      game". In-game advice is not listed either way. 1.0 already gave it, as ranked options; 1.2.0 keeps that form.
+  - **Model, enemy items** (`features.rs`, `logistic.rs`):
+    - `Situation.enemy_items` and `enemy_tags`, both `serde(default)`. Tags are 7 shares of the enemy team's build
+      items, counted against at least 8 items, × 4: armor, magic resist, healing, anti-heal, AP, AD, health.
+    - Features go to a new region after the pair region (2^16 slots): a tag level ([31]), the champion-role × tag
+      ([32], signed, `l2_pair`), and each of the player's items × tag for armor, MR, healing, anti-heal and health
+      ([33], `TrainOptions.l2_enemy` = 3e-3).
+    - The region starts at zero, so 1.1 checkpoints load unchanged.
+    - The step 2 network is unchanged.
+    - Synthetic: `SyntheticConfig.armor_effect` plants `ITEM_VS_ARMOR`. It is off by default, so the earlier sets
+      and their tests are unchanged.
+  - **Continuous learning** (`learner.rs`, `wire_learn.rs`):
+    - **`Learner::absorb`** trains an in-memory `Draft` (both steps, warm, replay 1:1) on whatever new records exist.
+      - `ContinuousOptions`: at least 1 game, step × 0.1, 1 pass, as measured.
+      - It runs unless the user is in champ select or a game.
+      - It returns `Waiting` before the first model, which still comes from `train_step` on 2,000 games while idle.
+    - **`Learner::check`** (`CheckPolicy`: every 150 games or 1 h, at least 100 validation matches, reset after 8
+      rejections):
+      - the calibration is fitted on the draft's own held-out records;
+      - then `judge_logistic`, and `judge_net` when step 1 was accepted (both split out of `train_step`, which
+        behaves as before).
+      - **Accept:** the manifest cursor moves to the draft's.
+      - **Reset:** the cursor moves too, and the games count as read.
+    - A restart drops the draft; games since the last accepted model are learnt again. A rollback drops the draft.
+    - **Server cycle:** absorb up to 200 games per call, then check; poll every 5 s while games arrive.
+      - Re-scoring and clean-up run idle only, each at most hourly.
+      - `set_activity` interrupts only for champ select and a game.
+  - **Overlay:** `LiveAdvice.buys: Vec<BuyNote>` (contract, `serde(default)`).
+    - Each note gives the cost from here, counting owned components once (`remaining_cost`), the gold short, the
+      most expensive affordable part of the recipe, and a reason from the enemy's items (`enemy_reason`).
+    - The overlay shows 3 next buys, the first marked, each with "Buy now (cost)" or "N short · part now (cost)".
+  - **Settings:** `timelineSample` default 0.25 (0.1 before) for new settings files; a choice of 10/25/50/100% in
+    Settings → Regions and rank.
+  - Measurements: MEASUREMENTS.md, "1.2.0".

@@ -157,3 +157,10 @@ export function looksLikeKey(s: string): boolean {
 export function gb(n: number): number {
   return n * 1024 * 1024 * 1024;
 }
+
+/** An item's price from here (1.2.0): "Buy now (3000)", or "650 short · Blasting Wand now (850)". */
+export function goldLine(b: { cost: number; short: number; part: number | null; partCost: number | null }, partName: (id: number) => string): string {
+  if (b.short === 0) return `Buy now (${b.cost})`;
+  const part = b.part != null && b.partCost != null ? ` · ${partName(b.part)} now (${b.partCost})` : '';
+  return `${b.short} short${part}`;
+}

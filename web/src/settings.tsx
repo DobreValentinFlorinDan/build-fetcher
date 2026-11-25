@@ -110,6 +110,14 @@ export function SettingsPage() {
             </select>
           </div>
           <p className="text-xs text-muted">Champion-role pairs with few Master+ games widen to Diamond on their own.</p>
+          <div className="flex items-center gap-3 text-sm">
+            <span className="text-muted">Timelines for other champions</span>
+            <select className="rounded-md border border-line bg-bg px-2 py-1 text-fg" value={String(s.timelineSample)} onChange={(e) => patch({ timelineSample: Number(e.target.value) })}>
+              {[0.1, 0.25, 0.5, 1].map((v) => <option key={v} value={String(v)}>{Math.round(v * 100)}%</option>)}
+              {![0.1, 0.25, 0.5, 1].includes(s.timelineSample) && <option value={String(s.timelineSample)}>{Math.round(s.timelineSample * 100)}%</option>}
+            </select>
+          </div>
+          <p className="text-xs text-muted">A timeline shows who bought what, when, and what the enemy had built: the model learns item choices only from games with one. Your tier A champions always get it. Each timeline is one more request, so a higher share fetches fewer games per hour.</p>
         </div>
       </Card>
       <Card title="Disk budget">
@@ -141,7 +149,7 @@ export function SettingsPage() {
       <Card title="Learning">
         <div className="space-y-3">
           <Toggle on={s.fetching} onChange={(fetching) => patch({ fetching })} label="Fetch new games" hint="Off pauses fetching until you turn it on again, also after a restart. It pauses on its own in champ select and in game." />
-          <Toggle on={s.learning} onChange={(learning) => patch({ learning })} label="Learn from new games" hint="Runs only while the PC is idle and League isn't open in a game or champ select." />
+          <Toggle on={s.learning} onChange={(learning) => patch({ learning })} label="Learn from new games" hint="Learns each new game as it arrives, a few milliseconds each, except in champ select or a game. The first model waits for an idle PC." />
           <Toggle on={s.gpu} onChange={(gpu) => patch({ gpu })} label="Use the GPU when available" hint="NVIDIA only, off by default. Checked against the CPU; any mismatch falls back to the CPU. Takes effect when Build Fetcher restarts." />
         </div>
       </Card>

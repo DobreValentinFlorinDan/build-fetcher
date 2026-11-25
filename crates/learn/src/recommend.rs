@@ -795,13 +795,70 @@ impl Recommender {
             notes.push(format!("Model {} win chance now {:.0}%", served.as_ref().map(|s| s.version()).unwrap_or_default(), p * 100.0));
         }
         notes.push("Several options, best first: the choice is yours".into());
-        Ok(LiveAdvice { next_buys, counters, predicted_win: now.map(|n| n.0), notes })
+        let enemy: Vec<i64> = ctx.enemy_items.iter().flat_map(|(_, v)| v.iter().copied()).filter(|i| self.classes.is_build_item(*i)).collect();
+        let mut buys: Vec<BuyNote> = vec![];
+        for id in next_buys.iter().chain(counters.iter().map(|c| &c.0)).map(|o| o.option.item_ids()[0]) {
+            if !buys.iter().any(|b| b.item == id) {
+                buys.push(self.buy_note(id, &ctx.my_items, ctx.my_gold, &enemy));
+            }
+        }
+        Ok(LiveAdvice { next_buys, counters, predicted_win: now.map(|n| n.0), notes, buys })
+    }
+
+    /// Gold still to pay for `id`, the most expensive affordable part of its recipe, and a reason from the enemy items.
+    fn buy_note(&self, id: i64, owned: &[i64], gold: f64, enemy: &[i64]) -> BuyNote {
+        let cost = remaining_cost(&self.data, id, &mut owned.to_vec()).round().max(0.0) as u32;
+        let gold = gold.max(0.0).floor() as u32;
+        let short = cost.saturating_sub(gold);
+        let (mut part, mut part_cost) = (None, None);
+        if short > 0 {
+            let mut nodes = vec![];
+            recipe_parts(&self.data, id, &mut nodes, 0);
+            let mut best: Option<(u32, i64)> = None;
+            for n in nodes {
+                if owned.contains(&n) {
+                    continue;
+                }
+                let c = remaining_cost(&self.data, n, &mut owned.to_vec()).round().max(0.0) as u32;
+                if c > 0 && c <= gold && best.map(|b| c > b.0 || (c == b.0 && n < b.1)).unwrap_or(true) {
+                    best = Some((c, n));
+                }
+            }
+            if let Some((c, n)) = best {
+                part = Some(n);
+                part_cost = Some(c);
+            }
+        }
+        BuyNote { item: id, cost, short, part, part_cost, reason: self.enemy_reason(id, enemy) }
+    }
+
+    /// What in the enemy's items makes `id` fit, when something stands out (counted from the scoreboard's items).
+    fn enemy_reason(&self, id: i64, enemy: &[i64]) -> Option<String> {
+        let it = self.data.item(id)?;
+        let has = |t: &str| it.tags.iter().any(|x| x == t);
+        let n = |bit: u8| enemy.iter().filter(|e| self.classes.tags.get(e).map(|m| m & (1 << bit) != 0).unwrap_or(false)).count();
+        let (armor, mr, heal, ap, ad) = (n(0), n(1), n(2), n(4), n(5));
+        if has("ArmorPenetration") && armor >= 3 {
+            Some(format!("{armor} enemy armor items"))
+        } else if has("MagicPenetration") && mr >= 3 {
+            Some(format!("{mr} enemy magic resist items"))
+        } else if it.anti_heal && heal >= 2 {
+            Some(format!("{heal} enemy healing items"))
+        } else if it.magic_resist > 0.0 && ap >= 4 && ap > ad {
+            Some(format!("{ap} enemy ability power items"))
+        } else if it.armor > 0.0 && ad >= 4 && ad > ap {
+            Some(format!("{ad} enemy attack damage items"))
+        } else {
+            None
+        }
     }
 
     fn live_situation(&self, ctx: &LiveContext, role: Role, opponent: Option<i64>, profile: Option<DamageProfile>) -> Situation {
         let mut s = self.situation_from_draft(&ctx.draft, role, opponent, profile);
         s.items = ctx.my_items.iter().copied().filter(|i| self.classes.completed.contains(i)).collect();
         s.boots = ctx.my_items.iter().copied().find(|i| self.classes.boots.contains(i));
+        s.enemy_items = ctx.enemy_items.iter().flat_map(|(_, v)| v.iter().copied()).filter(|i| self.classes.is_build_item(*i)).collect();
+        s.enemy_tags = self.classes.enemy_tag_levels(&s.enemy_items);
         let diff = |a: u8, b: u8| a as f64 - b as f64;
         s.state = crate::features::GameState {
             minute: ctx.game_time_s / 60.0,
@@ -845,9 +902,51 @@ impl BuildSource for Recommender {
     }
 }
 
+/// Gold still to pay for `id` when the items in `pool` are owned: the recipe's own price plus each component's
+/// remaining cost, a component owned counting as paid (and used up, so one owned part never pays for two).
+fn remaining_cost(data: &bf_core::ddragon::StaticData, id: i64, pool: &mut Vec<i64>) -> f64 {
+    if let Some(p) = pool.iter().position(|x| *x == id) {
+        pool.remove(p);
+        return 0.0;
+    }
+    let Some(it) = data.item(id) else { return 0.0 };
+    let parts: f64 = it.from.iter().map(|c| data.item(*c).map(|x| x.gold_total).unwrap_or(0.0)).sum();
+    let combine = (it.gold_total - parts).max(0.0);
+    combine + it.from.iter().map(|c| remaining_cost(data, *c, pool)).sum::<f64>()
+}
+
+/// Every component in `id`'s recipe, at any depth.
+fn recipe_parts(data: &bf_core::ddragon::StaticData, id: i64, out: &mut Vec<i64>, depth: usize) {
+    let Some(it) = data.item(id) else { return };
+    if depth > 4 {
+        return;
+    }
+    for c in &it.from {
+        if !out.contains(c) {
+            out.push(*c);
+        }
+        recipe_parts(data, *c, out, depth + 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An item's price from here: the full price with nothing owned, less each owned component (used once).
+    #[test]
+    fn remaining_cost_counts_owned_components_once() {
+        let data = bf_core::testkit::load_test_static_data();
+        let (id, it) = data.items.iter().find(|(_, i)| i.from.len() >= 2 && i.from[0] == i.from[1]).or_else(|| data.items.iter().find(|(_, i)| i.from.len() >= 2)).map(|(k, v)| (*k, v.clone())).unwrap();
+        assert_eq!(remaining_cost(&data, id, &mut vec![]), it.gold_total);
+        let c0 = data.item(it.from[0]).unwrap().gold_total;
+        assert_eq!(remaining_cost(&data, id, &mut vec![it.from[0]]), it.gold_total - c0);
+        // The item itself owned: nothing to pay.
+        assert_eq!(remaining_cost(&data, id, &mut vec![id]), 0.0);
+        let mut parts = vec![];
+        recipe_parts(&data, id, &mut parts, 0);
+        assert!(it.from.iter().all(|c| parts.contains(c)));
+    }
 
     #[test]
     fn page_keys_parse() {

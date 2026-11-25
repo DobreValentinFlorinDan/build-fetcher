@@ -13,8 +13,10 @@ It learns from every new high-elo match it fetches, and runs on one PC.
 
 - **In champ select** it detects your champion and role and shows its build at once. The build updates as picks come
   in. One click imports the rune page and an item set into the League client.
-- **In game** an overlay shows several next-buy and counter-item options, re-ranked from the live game. Each option
-  comes with its evidence. Nothing pops up and nothing tells you what to do.
+- **In game** an overlay shows three next-buy options and counter items, re-ranked from the live game: your items,
+  the enemy's items as the scoreboard shows them, and the game state. Each option shows its evidence, the gold you
+  still need (or "Buy now"), the part of its recipe your gold covers now, and what in the enemy's build makes it fit.
+  Nothing pops up and nothing tells you what to do.
 - **Every recommendation shows its evidence:** plain games and wins, the sample size, the win probability added, and
   a flag when data are thin. When data are thin it falls back from the matchup to the enemy's damage profile, then
   to the lane, then to the champion.
@@ -103,8 +105,8 @@ dashboard / champ select / overlay ◄── recommender ◄── learner (CPU;
   (any opponent, by lane opponent, by enemy damage profile) × option: games, wins and the win probability added.
   Tier B is ready the moment you lock any champion.
 
-One match fetch feeds tier B for all ten champions. Timelines are fetched for tier A games plus a 10% sample, used to
-learn item and skill order.
+One match fetch feeds tier B for all ten champions. Timelines are fetched for tier A games plus a sample of the rest
+(25% by default; Settings → Regions and rank), used to learn item and skill order and what the enemy had built.
 
 ### Sharing the key with Irelia Companion
 
@@ -119,11 +121,15 @@ Fetching pauses in champ select and in game.
 The model predicts the win chance from:
 - the champion, role, both team comps and the lane opponent;
 - runes, summoners, items owned and their order;
+- the enemy team's items at that minute: what share of their build is armor, magic resist, healing, anti-heal,
+  ability power, attack damage and health, and how each of your items does against each of those;
 - the game state: time, gold, CS and level difference to the lane opponent, kills, towers, dragons and barons.
 
-It is retrained incrementally as games arrive, with warm-started mini-batches, and only while the PC is idle.
-The first update waits for 2,000 new games. Later updates wait for 500 games or 6 hours, whichever comes first, so
-each update has enough evidence to beat the model in force. The Model page says what it is waiting for.
+Every player of every stored game counts, winners and losers alike: an item's effect shows only next to the games it
+lost. The first model is trained on a batch of 2,000 new games while the PC is idle. After that, each new game is
+learnt as it arrives, in a few milliseconds, whenever you're not in champ select or a game. Every 150 games the
+updated model is checked against the one in force on held-out games, and it replaces it only if no score got worse.
+The Model page says how many games were learnt since the last accepted model.
 
 1. **Step 1:** a logistic model per champion-role, shrunk toward a global model.
 2. **Step 2:** a small shared network on top, with champion, item, rune, summoner and skill-order embeddings.

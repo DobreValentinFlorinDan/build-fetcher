@@ -11,7 +11,7 @@ import { EMPTY_STATIC } from './ddragon.ts';
 type Page = 'build' | 'champSelect' | 'fetching' | 'model' | 'settings' | 'about';
 const PAGES: [Page, string][] = [['build', 'Build'], ['champSelect', 'Champ select'], ['fetching', 'Fetching'], ['model', 'Model'], ['settings', 'Settings'], ['about', 'About']];
 
-const ACTIVITY: Record<Activity, string> = { idle: 'PC idle: learning may run', busy: 'PC in use', champSelect: 'Champ select', inGame: 'In game' };
+const ACTIVITY: Record<Activity, string> = { idle: 'PC idle', busy: 'PC in use: learning goes on', champSelect: 'Champ select: learning paused', inGame: 'In game: learning paused' };
 
 function remembered(): Page {
   try {

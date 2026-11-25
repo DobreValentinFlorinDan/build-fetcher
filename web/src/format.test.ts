@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ago, bytes, dataAge, looksLikeKey, meter, optionParts, parseRunePage, pct, pts } from './format.ts';
+import { ago, bytes, dataAge, goldLine, looksLikeKey, meter, optionParts, parseRunePage, pct, pts } from './format.ts';
 
 test('numbers', () => {
   assert.equal(pct(0.5351), '53.5%');
@@ -45,4 +45,11 @@ test('key shape', () => {
   assert.ok(looksLikeKey(' RGAPI-00000000-test '));
   assert.ok(!looksLikeKey('RGAPI-'));
   assert.ok(!looksLikeKey('hello'));
+});
+
+test('gold line: buy now, or what is missing and the part to buy now', () => {
+  const name = (id: number) => (id === 1026 ? 'Blasting Wand' : `Item ${id}`);
+  assert.equal(goldLine({ cost: 3000, short: 0, part: null, partCost: null }, name), 'Buy now (3000)');
+  assert.equal(goldLine({ cost: 2900, short: 650, part: 1026, partCost: 850 }, name), '650 short · Blasting Wand now (850)');
+  assert.equal(goldLine({ cost: 2900, short: 2800, part: null, partCost: null }, name), '2800 short');
 });

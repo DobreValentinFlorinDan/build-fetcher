@@ -18,7 +18,16 @@ pub const GLOBAL_BITS: u32 = 16;
 pub const PAIR_BITS: u32 = 19;
 pub const GLOBAL: usize = 1 << GLOBAL_BITS;
 pub const PAIR: usize = 1 << PAIR_BITS;
-pub const DIM: usize = GLOBAL + PAIR;
+/// The enemy-build region (1.2.0), after the pair region so earlier checkpoints keep their slots and load with it at
+/// zero (they then predict exactly as before). Its first half is shared like the global part, its second half holds
+/// champion-role deviations (signed, like the pair part).
+pub const ENEMY_BITS: u32 = 16;
+pub const ENEMY: usize = 1 << ENEMY_BITS;
+const ENEMY_START: usize = GLOBAL + PAIR;
+const ENEMY_HALF: usize = ENEMY / 2;
+/// The enemy tags that meet the player's items one by one: armor, magic resist, healing, anti-heal, health.
+const INTERACT_TAGS: [usize; 5] = [0, 1, 2, 3, 6];
+pub const DIM: usize = GLOBAL + PAIR + ENEMY;
 /// Global slots below this are the dense game-state inputs and the bias, never hashed into.
 const RESERVED: usize = 40;
 const KNOT_FEATURES: usize = 8;
@@ -141,6 +150,41 @@ pub fn featurize(s: &Situation, out: &mut Vec<(u32, f64)>) {
         out.push(p(&[15, b], 1.0));
         out.push(g(&[19, b, prof]));
     }
+    enemy_features(s, role, out);
+}
+
+/// The enemy's build (1.2.0): each enemy item, each tag level, the champion-role's response to each tag, and each of
+/// the player's items against each tag ("this item does well against armor stacking"), in the enemy region.
+fn enemy_features(s: &Situation, role: i64, out: &mut Vec<(u32, f64)>) {
+    if s.enemy_items.is_empty() {
+        return;
+    }
+    let shared = |parts: &[i64], v: f64| -> (u32, f64) { ((ENEMY_START as u64 + hash(parts) % ENEMY_HALF as u64) as u32, v) };
+    let own = |parts: &[i64], v: f64| -> (u32, f64) {
+        let mut all = vec![2000, s.champion, role];
+        all.extend_from_slice(parts);
+        let h = hash(&all);
+        ((ENEMY_START as u64 + ENEMY_HALF as u64 + (h >> 1) % ENEMY_HALF as u64) as u32, if h & 1 == 1 { v } else { -v })
+    };
+    let mine: Vec<i64> = s.items.iter().copied().chain(s.boots).collect();
+    for (t, lv) in s.enemy_tags.iter().enumerate() {
+        if *lv == 0.0 {
+            continue;
+        }
+        let t = t as i64;
+        out.push(shared(&[31, t], *lv));
+        out.push(own(&[32, t], *lv));
+        // Ability power and attack damage already meet the items through the damage profile ([16]).
+        if INTERACT_TAGS.contains(&(t as usize)) {
+            for it in &mine {
+                out.push(shared(&[33, *it, t], *lv));
+            }
+        }
+    }
+}
+
+fn default_l2_enemy() -> f64 {
+    3e-3
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -151,6 +195,11 @@ pub struct TrainOptions {
     /// L2 on the global part, and on each pair's deviation (larger: pairs stay closer to the global model).
     pub l2_global: f64,
     pub l2_pair: f64,
+    /// L2 on the enemy region's shared half (item × enemy tag): weaker, because each item × tag pair is seen in few
+    /// rows and a pull as strong as the global part's kept its weight near zero (planted effects were found at a
+    /// tenth of their size on synthetic data). Its champion-role half takes `l2_pair`.
+    #[serde(default = "default_l2_enemy")]
+    pub l2_enemy: f64,
     pub batch: usize,
     pub epochs: usize,
     /// Epochs of the very first update (no model yet): it has to beat the baseline from one batch of records.
@@ -159,7 +208,7 @@ pub struct TrainOptions {
 
 impl Default for TrainOptions {
     fn default() -> Self {
-        TrainOptions { learning_rate: 0.003, beta1: 0.9, beta2: 0.999, l2_global: 1e-2, l2_pair: 3e-2, batch: 512, epochs: 2, cold_epochs: 6 }
+        TrainOptions { learning_rate: 0.003, beta1: 0.9, beta2: 0.999, l2_global: 1e-2, l2_pair: 3e-2, l2_enemy: default_l2_enemy(), batch: 512, epochs: 2, cold_epochs: 6 }
     }
 }
 
@@ -395,7 +444,15 @@ impl LogisticModel {
                 let b2t = 1.0 - bf_core::jsmath::pow(o.beta2, self.t as f64);
                 for &j in &touched {
                     let j = j as usize;
-                    let l2 = if j < RESERVED { 0.0 } else if j < GLOBAL { o.l2_global } else { o.l2_pair };
+                    let l2 = if j < RESERVED {
+                        0.0
+                    } else if j < GLOBAL {
+                        o.l2_global
+                    } else if (ENEMY_START..ENEMY_START + ENEMY_HALF).contains(&j) {
+                        o.l2_enemy
+                    } else {
+                        o.l2_pair
+                    };
                     let g = grad[j] + l2 * self.w[j];
                     self.m[j] = o.beta1 * self.m[j] + (1.0 - o.beta1) * g;
                     self.v[j] = o.beta2 * self.v[j] + (1.0 - o.beta2) * g * g;

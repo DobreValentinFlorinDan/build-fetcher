@@ -44,6 +44,14 @@ trademarks or registered trademarks of Riot Games, Inc.
 Settings, the database, Data Dragon, model checkpoints and logs live in `%APPDATA%\build-fetcher`. The uninstaller
 keeps that folder. Delete it by hand to start over.
 
+### Pausing
+
+- **Fetching:** the Fetching page has **Pause fetching** and **Resume fetching**. Pausing stops new requests at once,
+  and the choice is kept after a restart. Fetching also pauses on its own in champ select and in game.
+- **Learning:** the Model page has **Pause learning** and **Resume learning**.
+
+The same switches are in Settings.
+
 ### Moving to another PC, or keeping a copy
 
 Settings → Storage → **Export…** writes one zip with your settings, games, counts and model. The Riot API key is
@@ -114,6 +122,8 @@ The model predicts the win chance from:
 - the game state: time, gold, CS and level difference to the lane opponent, kills, towers, dragons and barons.
 
 It is retrained incrementally as games arrive, with warm-started mini-batches, and only while the PC is idle.
+The first update waits for 2,000 new games. Later updates wait for 500 games or 6 hours, whichever comes first, so
+each update has enough evidence to beat the model in force. The Model page says what it is waiting for.
 
 1. **Step 1:** a logistic model per champion-role, shrunk toward a global model.
 2. **Step 2:** a small shared network on top, with champion, item, rune, summoner and skill-order embeddings.

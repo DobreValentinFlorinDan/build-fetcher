@@ -354,7 +354,12 @@ async fn settings_patch(State(app): State<Arc<App>>, body: axum::body::Bytes) ->
     let data = app.static_data();
     let patch = validate_patch(&patch, &|c| c > 0 && data.as_ref().is_none_or(|d| d.champion(c).is_some()))?;
     let me = app.clone();
+    let learning = patch.learning;
     blocking(move || me.h.store.update_settings(&patch)).await?.map_err(ApiError::from)?;
+    if let Some(on) = learning {
+        let me = app.clone();
+        blocking(move || me.h.learner.set_learning(on)).await?;
+    }
     Ok(ok(blocking(move || settings_view(&app)).await?))
 }
 

@@ -91,6 +91,8 @@ pub enum Work {
 #[derive(Default)]
 struct State {
     paused: Option<String>,
+    /// Paused by the user (Settings `fetching: false`).
+    user_paused: bool,
     current: HashMap<Routing, String>,
     key_error: Option<String>,
     key_present: bool,
@@ -142,6 +144,7 @@ impl<A: RiotApi + 'static> Fetcher<A> {
 
     /// `clock` gives epoch milliseconds (tests: tokio's paused clock from a fixed date).
     pub fn with_clock(api: Arc<A>, store: Arc<Store>, settings: Settings, cfg: FetcherConfig, clock: Clock) -> Fetcher<A> {
+        let user_paused = !settings.fetching;
         Fetcher {
             inner: Arc::new(Inner {
                 api,
@@ -149,7 +152,7 @@ impl<A: RiotApi + 'static> Fetcher<A> {
                 settings: Mutex::new(settings),
                 cfg,
                 clock,
-                st: Mutex::new(State { key_present: true, ..Default::default() }),
+                st: Mutex::new(State { key_present: true, user_paused, ..Default::default() }),
                 stop: Signal::new(),
                 pause: Mutex::new(Signal::new()),
                 wake: tokio::sync::Notify::new(),
@@ -162,8 +165,22 @@ impl<A: RiotApi + 'static> Fetcher<A> {
     }
 
     pub fn update_settings(&self, s: Settings) {
+        let fetching = s.fetching;
         *self.inner.settings.lock() = s;
+        self.set_user_paused(!fetching);
         self.inner.wake.notify_waiters();
+    }
+
+    /// The user's pause (Fetching → Pause): requests in flight are cancelled and no new one starts until resumed.
+    pub fn set_user_paused(&self, paused: bool) {
+        let was = std::mem::replace(&mut self.inner.st.lock().user_paused, paused);
+        if paused && !was {
+            self.inner.pause.lock().abort("paused by you");
+        }
+        if !paused && was {
+            *self.inner.pause.lock() = Signal::new();
+            self.inner.wake.notify_waiters();
+        }
     }
 
     /// The key was set, changed or removed: a rejected key stops fetching until this is called.
@@ -230,7 +247,7 @@ impl<A: RiotApi + 'static> Fetcher<A> {
             st.matches.pop_front();
         }
         let (counted, _, validation, _) = self.inner.store.seen_counts().unwrap_or_default();
-        let paused = st.paused.clone().or_else(|| (!st.key_present).then(|| "no API key".to_string())).or_else(|| st.key_error.as_ref().map(|_| "key rejected".to_string()));
+        let paused = st.user_paused.then(|| "paused by you".to_string()).or_else(|| st.paused.clone()).or_else(|| (!st.key_present).then(|| "no API key".to_string())).or_else(|| st.key_error.as_ref().map(|_| "key rejected".to_string()));
         let mut current: Vec<String> = st.current.values().cloned().collect();
         current.sort();
         FetchStatus {
@@ -390,7 +407,7 @@ impl<A: RiotApi + 'static> Fetcher<A> {
             }
             let blocked = {
                 let st = self.inner.st.lock();
-                !st.key_present || st.key_error.is_some()
+                st.user_paused || !st.key_present || st.key_error.is_some()
             };
             if blocked {
                 self.idle(routing, None, &mut activity).await;

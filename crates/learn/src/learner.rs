@@ -70,12 +70,23 @@ pub struct Budget {
     pub deadline: Option<Duration>,
     /// What the user is doing, asked before the step and between mini-batches: anything but Idle stops it.
     pub activity: Arc<dyn Fn() -> Activity + Send + Sync>,
+    /// Fewer new records than this: the step waits (`Outcome::Waiting`) and reads nothing, so the records stay for a
+    /// later, bigger update. A tiny update can't beat the model in force on noise-sized evidence, and a rejected one
+    /// still marks its records as read.
+    pub min_records: usize,
+    /// The same for the very first update (no model yet): it has to beat the baseline on every metric at once.
+    pub first_min_records: usize,
+    /// Once a model exists, an update with fewer than `min_records` goes ahead anyway when this long has passed since
+    /// the last update (slow fetching: a shared key, few regions).
+    pub max_wait: Option<Duration>,
+    /// Fewer held-out validation matches than this: the step waits (the guardrail would judge on noise).
+    pub min_validation: usize,
 }
 
 impl Budget {
-    /// Up to `max_records`, no time limit, always idle (tests and measurements).
+    /// Up to `max_records`, no time limit, always idle, no minimums (tests and measurements).
     pub fn records(max_records: usize) -> Budget {
-        Budget { max_records, deadline: None, activity: Arc::new(|| Activity::Idle) }
+        Budget { max_records, deadline: None, activity: Arc::new(|| Activity::Idle), min_records: 0, first_min_records: 0, max_wait: None, min_validation: 0 }
     }
 }
 
@@ -88,6 +99,8 @@ pub enum Outcome {
     Rejected,
     /// No new records.
     NoData,
+    /// Fewer new records (or validation matches) than the budget's minimum: nothing was read, nothing changed.
+    Waiting,
     /// Stopped between mini-batches (activity, deadline or `interrupt`): nothing changed except as reported.
     Interrupted,
     /// Not started: the user isn't idle.
@@ -188,6 +201,10 @@ pub struct Learner {
     served: RwLock<Option<Arc<Served>>>,
     stop: AtomicBool,
     learning: AtomicBool,
+    /// When an update last ran (accepted or rejected), or when the learner opened: for `Budget::max_wait`.
+    last_update: Mutex<Instant>,
+    /// What the learner is waiting for, shown first in the status log.
+    waiting: Mutex<Option<String>>,
 }
 
 /// The process's peak resident memory (VmHWM), where the system says it.
@@ -273,6 +290,8 @@ impl Learner {
             served: RwLock::new(None),
             stop: AtomicBool::new(false),
             learning: AtomicBool::new(true),
+            last_update: Mutex::new(Instant::now()),
+            waiting: Mutex::new(None),
         };
         l.publish(&l.state.lock());
         Ok(l)
@@ -310,7 +329,7 @@ impl Learner {
             learning: self.learning.load(Ordering::SeqCst),
             backend: self.backend.name(),
             checkpoints: self.manifest.read().infos(),
-            log: self.store.log_tail(50),
+            log: self.waiting.lock().iter().cloned().chain(self.store.log_tail(50)).collect(),
         }
     }
 
@@ -419,6 +438,34 @@ impl Learner {
         if records.is_empty() {
             return Ok(report);
         }
+        // Wait for enough new records: nothing is read until then (the cursor is only saved at the end of a step).
+        let have_model = st.logistic.is_some();
+        let need = if have_model { budget.min_records } else { budget.first_min_records.max(budget.min_records) }.min(budget.max_records);
+        if records.len() < need {
+            let waited = self.last_update.lock().elapsed();
+            let overdue = have_model && budget.max_wait.map(|w| waited >= w).unwrap_or(false);
+            if !overdue {
+                *self.waiting.lock() = Some(format!(
+                    "Waiting for {} new games before the {} update ({} so far).",
+                    need,
+                    if have_model { "next" } else { "first" },
+                    records.len()
+                ));
+                report.outcome = Outcome::Waiting;
+                return Ok(report);
+            }
+        }
+        let val_records = src.validation_records()?;
+        if val_records.len() < budget.min_validation {
+            *self.waiting.lock() = Some(format!(
+                "Waiting for {} held-out games to check updates on ({} so far).",
+                budget.min_validation,
+                val_records.len()
+            ));
+            report.outcome = Outcome::Waiting;
+            return Ok(report);
+        }
+        *self.waiting.lock() = None;
         let mut clock = st.manifest.clock.clone();
         for r in &records {
             if let Some(v) = r.version {
@@ -435,7 +482,8 @@ impl Learner {
         let cal: Vec<Sample> = cal_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
         let n_records = records.len();
         drop(records);
-        let val: Vec<Sample> = src.validation_records()?.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        let val: Vec<Sample> = val_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        drop(val_records);
         report.samples = fresh.len();
         report.validation_samples = val.len();
 
@@ -583,6 +631,7 @@ impl Learner {
         self.store.prune(&mut st.manifest);
         self.store.save_manifest(&st.manifest)?;
         self.store.save_contexts(&st.contexts)?;
+        *self.last_update.lock() = Instant::now();
         report.outcome = if interrupted {
             Outcome::Interrupted
         } else if accepted_any {

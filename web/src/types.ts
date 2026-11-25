@@ -148,6 +148,8 @@ export type AppSettings = {
   tierADetected: number[];
   gpu: boolean;
   learning: boolean;
+  /** Fetching on, or paused by the user. */
+  fetching: boolean;
   firstRunComplete: boolean;
 };
 

@@ -88,7 +88,7 @@ async fn status_routes_match_the_contract() {
     assert_eq!(keys_of(&s), vec!["version", "activity", "lcu", "fetch", "model", "firstRunComplete", "keySet", "staticReady"]);
     assert_eq!(s["activity"], "idle");
     assert_eq!(s["lcu"], json!({ "status": "searching", "phase": "None" }));
-    assert_eq!(s["version"], "1.0.0");
+    assert_eq!(s["version"], env!("CARGO_PKG_VERSION"));
     // Each part deserializes into the contract's own type: same field names, same casing.
     let fetch: FetchStatus = serde_json::from_value(s["fetch"].clone()).unwrap();
     assert_eq!(fetch, t.store.fetch_status_for_test());
@@ -107,7 +107,7 @@ async fn status_routes_match_the_contract() {
     assert!(!ages.is_empty());
     let m: ModelStatus = serde_json::from_value(get(&t.app, "/api/model").await).unwrap();
     assert_eq!(m.checkpoints.iter().filter(|c| c.active).count(), 1);
-    assert_eq!(get(&t.app, "/api/health").await, json!({ "ok": true, "version": "1.0.0" }));
+    assert_eq!(get(&t.app, "/api/health").await, json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }));
     assert_eq!(get(&t.app, "/api/draft").await, Value::Null);
     assert_eq!(get(&t.app, "/api/live").await, Value::Null);
 }
@@ -446,4 +446,28 @@ async fn backup_routes_export_stage_and_cancel() {
     let (s, _) = call(&t.app, Method::POST, "/api/backup/cancel", None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(get(&t.app, "/api/backup/pending").await, Value::Null);
+}
+
+#[tokio::test]
+async fn fetching_and_learning_switch_on_and_off() {
+    let t = harness(KeyOffer::Missing);
+    // Both on by default.
+    let v = get(&t.app, "/api/settings").await;
+    assert_eq!(v["settings"]["fetching"], true);
+    assert_eq!(v["settings"]["learning"], true);
+    assert_eq!(get(&t.app, "/api/model").await["learning"], true);
+
+    // Pause both: saved in the settings, and the learner is told at once (an update in progress stops).
+    let (s, b) = call(&t.app, Method::PATCH, "/api/settings", Some(json!({ "fetching": false, "learning": false }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let v: Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(v["settings"]["fetching"], false);
+    assert_eq!(v["settings"]["learning"], false);
+    assert_eq!(get(&t.app, "/api/model").await["learning"], false);
+
+    // Resume.
+    let (s, _) = call(&t.app, Method::PATCH, "/api/settings", Some(json!({ "fetching": true, "learning": true }))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(get(&t.app, "/api/settings").await["settings"]["fetching"], true);
+    assert_eq!(get(&t.app, "/api/model").await["learning"], true);
 }

@@ -43,6 +43,9 @@ pub struct Settings {
     /// is checked against the processor and falls back to it, but was not run on real hardware before 1.0.
     pub gpu: bool,
     pub learning: bool,
+    /// Fetching on (the default) or paused by the user (Fetching → Pause). Kept across restarts.
+    #[serde(default = "yes")]
+    pub fetching: bool,
     /// "Name#TAG", as the user typed it.
     pub riot_id: Option<String>,
     pub puuid: Option<String>,
@@ -62,6 +65,7 @@ impl Default for Settings {
             tier_a: vec![],
             gpu: false,
             learning: true,
+            fetching: true,
             riot_id: None,
             puuid: None,
             my_platform: Platform::Eun1,
@@ -71,8 +75,12 @@ impl Default for Settings {
 }
 
 /// (json key, check) per field, in the order the file lists them.
-const FIELDS: [&str; 11] =
-    ["regions", "rankFloor", "widenToDiamond", "diskBudgetBytes", "tierA", "gpu", "learning", "riotId", "puuid", "myPlatform", "timelineSample"];
+const FIELDS: [&str; 12] =
+    ["regions", "rankFloor", "widenToDiamond", "diskBudgetBytes", "tierA", "gpu", "learning", "fetching", "riotId", "puuid", "myPlatform", "timelineSample"];
+
+fn yes() -> bool {
+    true
+}
 
 impl Settings {
     /// Every problem with these settings (empty when valid).

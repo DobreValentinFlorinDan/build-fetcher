@@ -326,7 +326,8 @@ fn planted_effects_are_recovered() {
     let at = late.iter().position(|o| o.option == BuildOption::late_item(MAW)).unwrap();
     assert!(at < 2 && late[at].wpa > 0.0 && late[at].basis == Basis::Profile, "{:#?}", late);
     let others = late.iter().filter(|o| o.option != BuildOption::late_item(MAW)).map(|o| o.wpa).sum::<f64>() / (late.len() - 1) as f64;
-    assert!(late[at].wpa > others + 0.04, "Maw {} vs the others' mean {others}", late[at].wpa);
+    // (Since 1.1.1 every estimate is shrunk harder toward "no effect", so the margin is smaller than the planted one.)
+    assert!(late[at].wpa > others + 0.02, "Maw {} vs the others' mean {others}", late[at].wpa);
 }
 
 #[test]
@@ -509,4 +510,78 @@ fn updates_wait_for_a_validation_sample() {
     assert!(l.status().log[0].starts_with("Waiting for 100 held-out games"), "{:?}", l.status().log);
     // With no minimums (tests, measurements) the same data train at once.
     assert_ne!(l.train_step(&src, &Budget::records(2000)).unwrap().outcome, Outcome::Waiting);
+}
+
+// ------------------------------------------------------------------------------------------------ scores and test set
+
+#[test]
+fn scores_count_test_matches_and_follow_the_growing_test_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = source(1500, 1);
+    let first = src.validation.len() as u32;
+    let l = Learner::open(dir.path(), data(), quick()).unwrap();
+    let r = l.train_step(&src, &Budget::records(1500)).unwrap();
+    assert_eq!(r.outcome, Outcome::Accepted, "{:#?}", r.log);
+    let v = r.steps[0].version.clone().unwrap();
+    let m = l.status().checkpoints.iter().find(|c| c.version == v).unwrap().metrics.clone();
+    assert_eq!(m.matches, first, "matches, not examples");
+    assert!(m.games > 10 * m.matches, "games counts examples: {} for {} matches", m.games, m.matches);
+    // The same test set: nothing to re-score.
+    assert!(l.rescore(&src).unwrap().is_none());
+
+    // The test set grows: the model in force is scored again on all of it; the model itself is unchanged.
+    let probe = l.samples(&src.validation)[0].situation.clone();
+    let before = l.served().unwrap().predict(&probe);
+    src.validation.extend(generate(&data(), &SyntheticConfig { matches: 10, validation: 300, seed: 9, first_id: 9_000_000, ..Default::default() }).validation);
+    let line = l.rescore(&src).unwrap().unwrap();
+    assert!(line.contains(&format!("re-scored on {} test matches (was {first})", first + 300)), "{line}");
+    let st = l.status();
+    let c = st.checkpoints.iter().find(|c| c.version == v).unwrap();
+    assert_eq!(c.metrics.matches, first + 300);
+    assert!(c.active);
+    assert!(st.log.iter().any(|x| x.contains("re-scored")), "{:?}", st.log);
+    assert_eq!(l.served().unwrap().predict(&probe).to_bits(), before.to_bits());
+    // Kept across a restart.
+    drop(l);
+    let l = Learner::open(dir.path(), data(), quick()).unwrap();
+    assert_eq!(l.status().checkpoints.iter().find(|c| c.version == v).unwrap().metrics.matches, first + 300);
+}
+
+// ------------------------------------------------------------------------------------------------ evidence in ranking
+
+/// The Ahri bug of 1.1.0: options with 1-25 games in mid borrowed the estimate of other roles (Summon Aery is strong on
+/// support Ahri) and outranked options with hundreds of mid games and a real, smaller edge.
+#[test]
+fn options_rank_on_their_own_role_and_thin_ones_never_lead() {
+    const AHRI: i64 = 103;
+    let patch = Patch { major: 16, minor: 23 };
+    let c = |role_games: u32, wins: u32, expected: f64, option: BuildOption| OptionCounts { patch, rank: RankBand::MasterPlus, context: CountContext::default(), option, games: role_games, wins, expected_wins: expected };
+    let flash_ignite = BuildOption::summoners(4, 14);
+    let exhaust_ignite = BuildOption::summoners(3, 14);
+    let electrocute = BuildOption::keystone(8112);
+    let aery = BuildOption::keystone(8214);
+    let mut src = generate(&data(), &SyntheticConfig { matches: 10, validation: 0, seed: 3, ..Default::default() });
+    src.counts.clear();
+    // Mid: Flash + Ignite 1,000 games at +1.4 pts, Exhaust + Ignite 1 lucky game; Electrocute 400 games at +2 pts,
+    // Aery 5 lucky games.
+    src.counts.insert((AHRI, Role::Middle), vec![
+        c(1000, 534, 520.0, flash_ignite.clone()),
+        c(1, 1, 0.52, exhaust_ignite.clone()),
+        c(400, 216, 208.0, electrocute.clone()),
+        c(5, 5, 2.6, aery.clone()),
+    ]);
+    // Support: Exhaust + Ignite and Aery are great there, which says nothing about mid.
+    src.counts.insert((AHRI, Role::Utility), vec![c(600, 360, 312.0, exhaust_ignite.clone()), c(600, 372, 312.0, aery.clone())]);
+    let rec = Recommender::new(Arc::new(src), None, data(), RecommendConfig::default());
+    let b = rec.recommend(&DraftContext { champion: AHRI, role: Some(Role::Middle), ..Default::default() }).unwrap();
+    for (kind, supported, lucky) in [(OptionKind::Summoners, &flash_ignite, &exhaust_ignite), (OptionKind::Keystone, &electrocute, &aery)] {
+        let opts = &section(&b, kind).options;
+        assert_eq!(&opts[0].option, supported, "{kind:?}: the option with real mid games leads: {opts:#?}");
+        assert!(!opts[0].thin && opts[0].basis == Basis::Lane);
+        let l = opts.iter().find(|o| &o.option == lucky).unwrap();
+        assert!(l.thin, "{l:?}");
+        assert_eq!(l.basis, Basis::Lane, "shown with its own mid games, not the support ones: {l:?}");
+        assert!(l.games <= 5, "{l:?}");
+        assert!(l.wpa.abs() < 0.01, "a few lucky games barely move the estimate: {l:?}");
+    }
 }

@@ -31,6 +31,10 @@ pub struct StoreOptions {
     pub validation_cap: usize,
     /// One timeline game in this many (by match id hash) goes to validation while it has room.
     pub validation_one_in: u64,
+    /// Until the sample holds this many matches, one timeline game in `validation_fast_one_in` goes to it instead: an
+    /// empty sample makes every early score rest on a handful of matches, and the learner waits for 100.
+    pub validation_fast_until: usize,
+    pub validation_fast_one_in: u64,
     /// Records packed before the zstd dictionary is made from them.
     pub dictionary_after: usize,
     /// A champion-role with fewer games than this on the newest patch is thin (targeted sourcing, widening).
@@ -43,7 +47,7 @@ pub struct StoreOptions {
 
 impl Default for StoreOptions {
     fn default() -> Self {
-        StoreOptions { validation_cap: 4000, validation_one_in: 10, dictionary_after: 64, thin_games: 300, player_champs_per_pair: 40, baseline_prior_games: 20.0 }
+        StoreOptions { validation_cap: 4000, validation_one_in: 10, validation_fast_until: 300, validation_fast_one_in: 3, dictionary_after: 64, thin_games: 300, player_champs_per_pair: 40, baseline_prior_games: 20.0 }
     }
 }
 
@@ -293,7 +297,8 @@ impl Store {
                 let mine = r.rank == Some(RankBand::Mine);
                 let tl = r.has_timeline();
                 // The held-out sample: timeline games, by a fixed hash of the id, never the user's own.
-                let to_validation = tl && !mine && id_hash(&r.match_id) % self.opts.validation_one_in.max(1) == 0 && {
+                let one_in = if w.validation < self.opts.validation_fast_until { self.opts.validation_fast_one_in } else { self.opts.validation_one_in };
+                let to_validation = tl && !mine && id_hash(&r.match_id) % one_in.max(1) == 0 && {
                     if w.validation < self.opts.validation_cap {
                         true
                     } else {

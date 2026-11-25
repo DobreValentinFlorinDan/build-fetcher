@@ -151,7 +151,7 @@ impl Default for FakeLearner {
             version: v.into(),
             kind: kind.into(),
             created_ms: 1_764_000_000_000,
-            metrics: Metrics { games: 2000, log_loss: loss, brier: loss * 0.36, calibration: vec![0.021, 0.018, 0.024, 0.031] },
+            metrics: Metrics { games: 2000, matches: 300, log_loss: loss, brier: loss * 0.36, calibration: vec![0.021, 0.018, 0.024, 0.031] },
             records_seen: 12_000,
             active,
         };

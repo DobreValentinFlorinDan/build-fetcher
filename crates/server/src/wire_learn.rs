@@ -30,6 +30,8 @@ const MIN_RECORDS: usize = 500;
 const MAX_WAIT: Duration = Duration::from_secs(6 * 3600);
 /// Held-out matches the guardrail needs before it can judge an update (the store keeps 1 timeline game in 10).
 const MIN_VALIDATION: usize = 100;
+/// While waiting for data, the models in force are scored again on the grown held-out sample at most this often.
+const RESCORE_EVERY: Duration = Duration::from_secs(3600);
 /// One step may take this long before it stops between mini-batches (it is resumed at the next idle moment).
 const STEP_DEADLINE: Duration = Duration::from_secs(120);
 /// How often the cycle looks again when there is nothing to do or the user is busy.
@@ -93,6 +95,7 @@ impl RealLearner {
 
     /// The training cycle (its own thread: training is CPU-bound and must never hold up the server's tasks).
     fn run(self: Arc<Self>, learner: Arc<Learner>, db: Arc<bf_store::Store>, store: Arc<RealStore>) {
+        let mut last_rescore: Option<std::time::Instant> = None;
         loop {
             let settings = bf_store::settings::load(&bf_store::settings::settings_file()).0;
             learner.set_learning(settings.learning);
@@ -120,6 +123,15 @@ impl RealLearner {
             };
             // Nothing to learn yet (no or too few new records, learning off, not idle): wait without a log line every poll.
             // The dashboard's model status says what the learner waits for.
+            if matches!(report.outcome, Outcome::NoData | Outcome::Waiting) && last_rescore.is_none_or(|t: std::time::Instant| t.elapsed() >= RESCORE_EVERY) {
+                // Idle and waiting: show today's scores (early ones rest on a handful of held-out matches).
+                last_rescore = Some(std::time::Instant::now());
+                match learner.rescore(&*db) {
+                    Ok(Some(line)) => crate::bf_log!("[learn] {line}"),
+                    Ok(None) => {}
+                    Err(e) => crate::bf_log!("[learn] re-scoring failed: {}", crate::routes::scrub(&e.to_string())),
+                }
+            }
             if matches!(report.outcome, Outcome::NoData | Outcome::Waiting | Outcome::NotIdle | Outcome::Disabled) {
                 std::thread::sleep(IDLE_POLL);
                 continue;

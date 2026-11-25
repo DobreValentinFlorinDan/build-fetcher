@@ -405,3 +405,25 @@ agreement, and write each change in the hand-over section of this file.
       "paused by you".
     - `LearnerHandle::set_learning` interrupts an update in progress.
     - Buttons on the Fetching and Model pages, and toggles in Settings.
+- (lead, 2026-11-25, 1.1.1) **Scores that mean something early.**
+  - `Metrics.matches` (contract, added with `serde(default)`): distinct test matches. `Metrics.games` keeps counting
+    examples (player × minute); the Model page shows matches.
+  - **Store:** `validation_fast_until` (300) and `validation_fast_one_in` (3). The held-out sample takes 1 timeline game
+    in 3 until it holds 300 matches, then 1 in 10.
+  - **`Learner::rescore`:** scores the models in force on the current held-out sample when it has more matches than
+    when they were scored. Called while idle and waiting, at most hourly. Only the metrics change, and a log line says
+    so.
+- (lead, 2026-11-25, 1.1.1) **Recommender ranking, after a user report (Ahri mid).** Options with 1–25 games
+  outranked options with hundreds.
+  - **Causes:**
+    - the role level was shrunk toward the champion's all-role estimate (cross-role leakage);
+    - shrinkage was weak (40 pseudo-games);
+    - ranking was by point estimate alone.
+  - **Now:**
+    - `RecommendConfig.shrink` = 250, from the binomial noise: 0.25 / (3 pts)².
+    - The role is shrunk toward 0, and toward the champion's other roles only when the role has fewer than
+      `role_min_games` (200).
+    - A thin option (under `min_games` in its basis) ranks after the supported ones; thin ones are ordered by games.
+      The same holds for live next buys.
+    - Options show their own role's games; the dashboard shows the played win rate and the estimate, labelled "est.".
+  - Regression test: `options_rank_on_their_own_role_and_thin_ones_never_lead` (fails on 1.1.0).

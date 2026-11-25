@@ -102,7 +102,8 @@ export type ExportReport = { path: string; bytes: number; includesKey: boolean; 
 /** A backup staged for import (POST /api/backup/import, GET /api/backup/pending). */
 export type ImportSummary = { version: string; createdMs: number; includesKey: boolean; databaseBytes: number; checkpointFiles: number };
 
-export type Metrics = { games: number; logLoss: number; brier: number; calibration: number[] };
+/** `games` counts examples (a player at a minute of a test match); `matches` the test matches (0 before 1.1.1). */
+export type Metrics = { games: number; matches: number; logLoss: number; brier: number; calibration: number[] };
 export type CheckpointInfo = { version: string; kind: string; createdMs: number; metrics: Metrics; recordsSeen: number; active: boolean };
 export type ModelStatus = { learning: boolean; backend: string; checkpoints: CheckpointInfo[]; log: string[] };
 

@@ -75,7 +75,7 @@ pub fn evaluation(p: &[f64], y: &[f64], window: &[usize], group: &[u64]) -> Eval
         f
     });
     let nf = n.max(1) as f64;
-    Evaluation { metrics: Metrics { games: 0, log_loss: ll / nf, brier: br / nf, calibration }, examples: counts.map(|c| c as usize), noise }
+    Evaluation { metrics: Metrics { games: 0, matches: 0, log_loss: ll / nf, brier: br / nf, calibration }, examples: counts.map(|c| c as usize), noise }
 }
 
 /// What counts as worse. Log loss and Brier must not rise at all. A window's calibration error is worse when it is

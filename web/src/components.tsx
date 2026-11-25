@@ -92,13 +92,14 @@ export function Evidence({ o, compact = false }: { o: RankedOption; compact?: bo
   return (
     <span className={`flex flex-wrap items-center gap-x-3 gap-y-1 ${compact ? 'text-[11px]' : 'text-xs'} text-muted`}>
       <span title={`${count(o.wins)} wins of ${count(o.games)} games (${o.weightedGames.toFixed(0)} after weighting by recency and rank)`}>
-        <b className="text-fg">{count(o.games)}</b> games
+        <b className="text-fg">{count(o.games)}</b> {o.games === 1 ? 'game' : 'games'}
       </span>
-      <span title="Win rate, shrunk toward the baseline when games are few">{pct(o.winRate)} win</span>
-      <span title="Win probability added against the baseline" className={o.wpa > 0 ? 'text-good' : o.wpa < 0 ? 'text-bad' : ''}>{pts(o.wpa)}</span>
+      {/* What happened in those games; the estimate beside it is what the ranking uses. */}
+      {o.games > 0 && <span title="Win rate in these games, as played">{pct(o.wins / o.games)} win</span>}
+      <span title="Estimated win probability added: these games' result against the baseline, shrunk toward no effect when games are few (a few lucky games move it very little)" className={o.wpa > 0 ? 'text-good' : o.wpa < 0 ? 'text-bad' : ''}>{pts(o.wpa)} est.</span>
       {o.predictedWin != null && <span title="The model's predicted win chance in a context like yours">model {pct(o.predictedWin)}</span>}
       {!compact && <span title={BASIS[o.basis]}>basis: {o.basis}</span>}
-      {o.thin && <span className="rounded bg-warn/15 px-1.5 text-warn" title="Fewer games than this section's minimum: shown, but treat it with care">thin data</span>}
+      {o.thin && <span className="rounded bg-warn/15 px-1.5 text-warn" title="Too few games in this role to judge: listed after the options the data support">thin data</span>}
     </span>
   );
 }

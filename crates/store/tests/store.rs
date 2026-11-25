@@ -8,7 +8,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 fn open(dir: &std::path::Path) -> Store {
-    Store::open(dir, load_test_static_data(), StoreOptions { dictionary_after: 16, ..Default::default() }).unwrap()
+    // The steady 1-in-10 held-out rate these tests were written for; the faster start has its own test below.
+    Store::open(dir, load_test_static_data(), StoreOptions { dictionary_after: 16, validation_fast_until: 0, ..Default::default() }).unwrap()
 }
 
 fn ingest_synth(store: &Store, s: &Synth, range: std::ops::Range<u64>) -> Vec<Outcome> {
@@ -203,4 +204,21 @@ fn cleanup_keeps_counts_validation_and_the_window_and_honours_the_budget() {
     assert!(rep.over_budget);
     assert_eq!(store.current_patch().unwrap(), Some(p(19)));
     assert_eq!(store.storage_status(u64::MAX, &other).unwrap().patches, vec![p(19)]);
+}
+
+#[test]
+fn the_test_set_fills_faster_until_it_holds_enough_matches() {
+    // Every game with a timeline: 1 in 3 goes to the held-out sample until it holds 30, then 1 in 10.
+    let s = Synth::new(SynthOptions { timeline_share: 1.0, noise_share: 0.0, ..Default::default() }, load_test_static_data());
+    let filled = |fast_until: usize, n: u64| {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), load_test_static_data(), StoreOptions { validation_fast_until: fast_until, ..Default::default() }).unwrap();
+        let out = ingest_synth(&store, &s, 0..n);
+        out.iter().filter(|o| **o == Outcome::Validation).count()
+    };
+    let (fast_early, slow_early) = (filled(30, 120), filled(0, 120));
+    assert!(fast_early >= 30 && fast_early > 2 * slow_early, "first 120 games: {fast_early} with the fast start, {slow_early} without");
+    // Past the target the rate drops back to 1 in 10: 600 games give far fewer than a third.
+    let fast_all = filled(30, 600);
+    assert!(fast_all > filled(0, 600) && fast_all < 600 / 3, "{fast_all}");
 }

@@ -693,7 +693,12 @@ pub struct StorageStatus {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Metrics {
+    /// Examples scored: one player at one minute of a test match (up to 70 per match). Despite the name, not matches:
+    /// see `matches`.
     pub games: u32,
+    /// Distinct test matches behind the numbers (0 in checkpoints written before 1.1.1).
+    #[serde(default)]
+    pub matches: u32,
     pub log_loss: f64,
     pub brier: f64,
     /// Expected calibration error per 10-minute window of game time (0-10, 10-20, 20-30, 30+).

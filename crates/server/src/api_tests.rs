@@ -95,7 +95,7 @@ async fn status_routes_match_the_contract() {
     let model: ModelStatus = serde_json::from_value(s["model"].clone()).unwrap();
     assert_eq!(model.checkpoints.len(), 3);
     assert_eq!(keys_of(&s["fetch"]["budgets"][0]), vec!["scope", "limits", "used", "ours", "limit", "windowS", "shared"]);
-    assert_eq!(keys_of(&s["model"]["checkpoints"][0]["metrics"]), vec!["games", "logLoss", "brier", "calibration"]);
+    assert_eq!(keys_of(&s["model"]["checkpoints"][0]["metrics"]), vec!["games", "matches", "logLoss", "brier", "calibration"]);
 
     let f: FetchStatus = serde_json::from_value(get(&t.app, "/api/fetch").await).unwrap();
     assert_eq!(f.budgets.iter().filter(|b| b.shared).count(), 1);

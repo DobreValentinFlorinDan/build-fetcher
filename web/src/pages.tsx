@@ -219,7 +219,7 @@ export function FetchingPage({ status }: { status: Status | null }) {
         {volumes.error && <ErrorText>{volumes.error}</ErrorText>}
         <div className="max-h-[28rem] overflow-auto">
           <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-panel text-left text-xs text-muted"><tr><th className="py-1">Champion</th><th>Roles</th><th className="text-right">Games</th><th className="text-right">Newest game</th></tr></thead>
+            <thead className="sticky top-0 bg-panel text-left text-xs text-muted"><tr><th className="py-1">Champion</th><th>Roles</th><th className="text-right" title="Held-out matches these scores were measured on (re-measured as the test set grows)">Test matches</th><th className="text-right">Newest game</th></tr></thead>
             <tbody>
               {dataAge(volumes.data ?? []).map((r) => (
                 <tr key={r.champion} className="border-t border-line">
@@ -276,7 +276,7 @@ export function RollbackButtons({ model, onDone }: { model: ModelStatus; onDone:
               <td className="text-right">{c.metrics.logLoss.toFixed(4)}</td>
               <td className="text-right">{c.metrics.brier.toFixed(4)}</td>
               <td className="text-right text-muted" title="Per 10-minute window: 0-10, 10-20, 20-30, 30+">{c.metrics.calibration.map((x) => x.toFixed(3)).join(' · ')}</td>
-              <td className="text-right">{count(c.metrics.games)}</td>
+              <td className="text-right" title={`${count(c.metrics.games)} examples (a player at a moment of a match)`}>{c.metrics.matches > 0 ? count(c.metrics.matches) : '—'}</td>
               <td className="text-right">{!c.active && <button className="text-xs text-accent hover:underline" onClick={() => roll(c.version)}>Roll back</button>}</td>
             </tr>
           ))}

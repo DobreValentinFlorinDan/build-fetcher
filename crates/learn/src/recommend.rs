@@ -37,8 +37,14 @@ const MODEL_KINDS: [OptionKind; 5] = [OptionKind::RunePage, OptionKind::Keystone
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RecommendConfig {
     pub weights: WeightOptions,
-    /// Pseudo-games each level is shrunk with toward the next.
+    /// Pseudo-games each level is shrunk with toward the next (the role's own level toward no effect). Why 250: one
+    /// game's result has variance 0.25, and real option effects are a few points (sd ≈ 3 pts, variance ≈ 0.001), so
+    /// the evidence of n games weighs n / (n + 0.25 / 0.001) ≈ n / (n + 250). 25 lucky games then move an estimate
+    /// by a tenth of what they show, 1,000 games by four fifths.
     pub shrink: f64,
+    /// A role with fewer games of this champion than this leans on the champion's other roles; above it, a role
+    /// stands on its own (Summon Aery on support Ahri says nothing about mid Ahri).
+    pub role_min_games: u32,
     /// Weighted games a level needs to be an option's basis.
     pub min_games: f64,
     /// Options shown per section.
@@ -57,7 +63,8 @@ impl Default for RecommendConfig {
     fn default() -> Self {
         RecommendConfig {
             weights: WeightOptions::default(),
-            shrink: 40.0,
+            shrink: 250.0,
+            role_min_games: 200,
             min_games: 30.0,
             per_section: 5,
             tier_a_min_samples: 1500,
@@ -128,6 +135,16 @@ pub struct Recommender {
     names: Names,
     backend: Arc<dyn Backend>,
     config: RecommendConfig,
+}
+
+/// Order within a group of equally supported options (call after splitting thin from supported): supported ones by
+/// their estimate, then games; thin ones by games played.
+fn by_evidence(a: &(f64, RankedOption), b: &(f64, RankedOption)) -> std::cmp::Ordering {
+    if a.1.thin {
+        b.1.weighted_games.total_cmp(&a.1.weighted_games)
+    } else {
+        b.0.total_cmp(&a.0).then(b.1.weighted_games.total_cmp(&a.1.weighted_games))
+    }
 }
 
 fn role_name(r: Role) -> &'static str {
@@ -316,11 +333,17 @@ impl Recommender {
         Ok(Evidence { by_kind, base, lane_games })
     }
 
-    fn estimate(&self, s: &Stats, has_opp: bool, has_profile: bool) -> Estimate {
+    /// The option's win probability added in this role and situation, and the evidence it rests on.
+    ///
+    /// Each level is shrunk toward the next: the matchup and the enemy profile toward the role, the role toward no
+    /// effect. The champion's other roles are the role's prior only when the role itself is thin (`role_thin`). The
+    /// basis is the most specific level with `min_games`; an option without them in this role is `thin` and ranks
+    /// after the supported ones (see `recommend_inner`).
+    fn estimate(&self, s: &Stats, has_opp: bool, has_profile: bool, role_thin: bool) -> Estimate {
         let k = self.config.shrink;
         let shrink = |l: &Level, prior: f64| (l.ww - l.we + k * prior) / (l.wg + k);
-        let champ = shrink(&s.champion, 0.0);
-        let lane = shrink(&s.lane, champ);
+        let role_prior = if role_thin { shrink(&s.champion, 0.0) } else { 0.0 };
+        let lane = shrink(&s.lane, role_prior);
         let prof = if has_profile { shrink(&s.profile, lane) } else { lane };
         let wpa = if has_opp { shrink(&s.matchup, prof) } else { prof };
         let min = self.config.min_games;
@@ -328,12 +351,13 @@ impl Recommender {
             (Basis::Matchup, s.matchup)
         } else if has_profile && s.profile.wg >= min {
             (Basis::Profile, s.profile)
-        } else if s.lane.wg >= min {
+        } else if s.lane.wg >= min || !role_thin {
+            // Shown with this role's own games, however few: never counts from other roles.
             (Basis::Lane, s.lane)
         } else {
             (Basis::Champion, s.champion)
         };
-        Estimate { wpa, basis, level, thin: basis == Basis::Champion }
+        Estimate { wpa, basis, level, thin: level.wg < min || basis == Basis::Champion }
     }
 
     fn ranked(&self, s: &Stats, e: &Estimate, base: f64, predicted: Option<f64>, wpa: f64) -> RankedOption {
@@ -576,7 +600,8 @@ impl Recommender {
             // Most played first: the candidate list, and the order ties keep.
             stats.sort_by(|a, b| (b.lane.wg + 1e-3 * b.champion.wg).total_cmp(&(a.lane.wg + 1e-3 * a.champion.wg)).then(a.option.cmp(&b.option)));
             let base = ev.base.get(&kind).copied().unwrap_or(0.5);
-            let est: Vec<Estimate> = stats.iter().map(|s| self.estimate(s, opponent.is_some(), profile.is_some())).collect();
+            let role_thin = ev.lane_games < self.config.role_min_games;
+            let est: Vec<Estimate> = stats.iter().map(|s| self.estimate(s, opponent.is_some(), profile.is_some(), role_thin)).collect();
             let mut options: Vec<(f64, RankedOption)> = vec![];
             let model = served.as_ref().filter(|_| MODEL_KINDS.contains(&kind) && !stats.is_empty());
             if let Some(sv) = model {
@@ -592,7 +617,10 @@ impl Recommender {
                     options.push((e.wpa, self.ranked(s, e, base, None, e.wpa)));
                 }
             }
-            options.sort_by(|a, b| b.0.total_cmp(&a.0));
+            // Options with enough games in this role first, by their estimate (ties: more games first); thin ones after
+            // them, most played first. A thin option's estimate rests on next to nothing, so it never outranks one the
+            // data support, and among thin ones how often high-elo players pick it says more than a few results.
+            options.sort_by(|a, b| a.1.thin.cmp(&b.1.thin).then_with(|| by_evidence(a, b)));
             for (_, o) in options.iter().take(self.config.per_section) {
                 if o.basis != Basis::Matchup && opponent.is_some() {
                     *fell_back.entry(basis_name(o.basis)).or_default() += 1;
@@ -666,6 +694,7 @@ impl Recommender {
         let (share, heal, enemy_armor, enemy_mr) = self.enemy_build(ctx);
         let profile = Some(DamageProfile::from_magic_share(share));
         let ev = self.evidence(d.champion, role, opponent, profile)?;
+        let role_thin = ev.lane_games < self.config.role_min_games;
         let owned = &ctx.my_items;
         let has_boots = owned.iter().any(|i| self.classes.boots.contains(i));
         let open = |id: i64| -> bool {
@@ -679,7 +708,7 @@ impl Recommender {
                 if !self.eligible(&s.option) || !open(id) || cands.contains_key(&id) {
                     continue;
                 }
-                let e = self.estimate(s, opponent.is_some(), profile.is_some());
+                let e = self.estimate(s, opponent.is_some(), profile.is_some(), role_thin);
                 cands.insert(id, (s.clone(), e, kind));
             }
         }
@@ -687,7 +716,7 @@ impl Recommender {
             for id in s.option.item_ids() {
                 if open(id) && !cands.contains_key(&id) {
                     let st = Stats { option: BuildOption::late_item(id), ..s.clone() };
-                    let e = self.estimate(&st, opponent.is_some(), profile.is_some());
+                    let e = self.estimate(&st, opponent.is_some(), profile.is_some(), role_thin);
                     cands.insert(id, (st, e, OptionKind::LateItem));
                 }
             }
@@ -718,7 +747,8 @@ impl Recommender {
                 (wpa, self.ranked(s, e, base, pred, wpa))
             })
             .collect();
-        next.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.option.cmp(&b.1.option)));
+        // As in champ select: items the data support in this role first, thin ones after.
+        next.sort_by(|a, b| a.1.thin.cmp(&b.1.thin).then_with(|| by_evidence(a, b)).then(a.1.option.cmp(&b.1.option)));
         let mut next_buys: Vec<RankedOption> = next.into_iter().map(|x| x.1).take(self.config.per_section).collect();
         let magic_me = DamageProfile::magic_share_of(&self.data, d.champion).unwrap_or(0.5) >= 0.5;
         if next_buys.len() < 2 {

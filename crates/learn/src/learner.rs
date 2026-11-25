@@ -244,6 +244,7 @@ pub fn evaluate_full(p: &[f64], val: &[Sample]) -> Evaluation {
     let g: Vec<u64> = val.iter().map(|s| s.group).collect();
     let mut e = evaluation(p, &y, &w, &g);
     e.metrics.games = val.len() as u32;
+    e.metrics.matches = val.iter().map(|s| s.game).collect::<std::collections::BTreeSet<u64>>().len() as u32;
     e
 }
 
@@ -385,6 +386,47 @@ impl Learner {
     fn residuals_of(n: &SharedNet, xs: &[Sample]) -> Vec<f64> {
         let refs: Vec<&Situation> = xs.iter().map(|s| &s.situation).collect();
         n.residuals(&refs)
+    }
+
+    /// Scores the models in force again on today's held-out sample, when it has more matches than when they were
+    /// scored (the sample grows as games arrive, so early scores rest on very few matches). Only the shown metrics
+    /// change; the models don't. Returns the log line, or None when there was nothing to do.
+    pub fn rescore(&self, src: &dyn DataSource) -> Result<Option<String>> {
+        let mut st = self.state.lock();
+        let Some((lv, lm)) = st.logistic.clone() else { return Ok(None) };
+        let val: Vec<Sample> = src.validation_records()?.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        if val.is_empty() {
+            return Ok(None);
+        }
+        let matches = val.iter().map(|s| s.game).collect::<std::collections::BTreeSet<u64>>().len() as u32;
+        let scored = st.manifest.entry(&lv).map(|e| e.metrics.matches).unwrap_or(0);
+        if matches <= scored {
+            return Ok(None);
+        }
+        let z = self.logits_of(&lm, &val);
+        let m_l = evaluate_full(&z.iter().map(|x| sigmoid(*x)).collect::<Vec<_>>(), &val).metrics;
+        let m_nn = st.net.as_ref().map(|(v, n)| {
+            let r = Self::residuals_of(n, &val);
+            (v.clone(), evaluate_full(&z.iter().zip(&r).map(|(a, b)| sigmoid(a + b)).collect::<Vec<_>>(), &val).metrics)
+        });
+        let mut line = String::new();
+        for (v, m) in std::iter::once((lv.clone(), m_l)).chain(m_nn) {
+            if let Some(e) = st.manifest.checkpoints.iter_mut().find(|e| e.version == v) {
+                line.push_str(&format!(
+                    "{}{v} re-scored on {} test matches (was {}): {} -> {}",
+                    if line.is_empty() { "" } else { "; " },
+                    m.matches,
+                    if e.metrics.matches > 0 { e.metrics.matches.to_string() } else { format!("{} examples", e.metrics.games) },
+                    fmt_metrics(&e.metrics),
+                    fmt_metrics(&m)
+                ));
+                e.metrics = m;
+            }
+        }
+        self.store.save_manifest(&st.manifest)?;
+        self.publish(&st);
+        self.store.log(&line);
+        Ok(Some(line))
     }
 
     /// One guarded update (see the module notes). Call it only while the user is idle; it stops between mini-batches

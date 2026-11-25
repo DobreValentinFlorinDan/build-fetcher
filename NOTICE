@@ -1,0 +1,22 @@
+Build Fetcher
+Copyright (c) 2026 Dobre Valentin Florin Dan
+
+Build Fetcher began as a copy of Irelia Companion 2.2.0
+(https://github.com/DobreValentinFlorinDan/irelia-companion, commit 919a8e3), by the same author.
+It reuses that project's engineering:
+  - the Rust workspace layout, and the CI and release workflows;
+  - the Tauri v2 shell, tray and in-game overlay;
+  - the Riot API client and its GCRA rate limiter;
+  - the League client (LCU) connector, the Live Client tracker, and the rune and item-set importer;
+  - the zstd codec, the correctly rounded math (jsmath) and JSON number formatting;
+  - the CUDA driver loader and its self-check;
+  - the Data Dragon loader, the item catalog and the exclusivity groups;
+  - the synthetic match-v5 test kit.
+Irelia Companion's model, evaluation, scraper, storage format and data are not carried over.
+
+Build Fetcher isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone
+officially involved in producing or managing Riot Games properties. Riot Games, and all associated properties are
+trademarks or registered trademarks of Riot Games, Inc.
+
+Third-party open-source components and their licenses are listed in Cargo.lock and package-lock.json. The app
+bundles SQLite (public domain) and zstd (BSD).

@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "bridge",
+  "description": "window.buildFetcher: the dashboard and the overlay, served by the app's own server on 127.0.0.1, may call the desktop app's commands (each command checks the page's origin again). Nothing else: no Tauri plugin is reachable from the pages.",
+  "windows": ["main", "overlay"],
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": [
+    "allow-desktop-info",
+    "allow-open-folder",
+    "allow-settings-get",
+    "allow-settings-set",
+    "allow-keep-awake-state",
+    "allow-overlay-state",
+    "allow-overlay-set-visible",
+    "allow-overlay-set-click-through",
+    "allow-overlay-fit-height"
+  ]
+}

@@ -1,0 +1,130 @@
+//
+// Build Fetcher: the logistic model's forward pass on an NVIDIA GPU (crates/learn backend.rs, CudaAccelerator).
+// Hand-written PTX (no CUDA toolkit is used to build Build Fetcher): the NVIDIA driver compiles it for the card at run
+// time. If the driver rejects it, loading fails and the processor is used; if it computes anything different from the
+// processor, the learner's check finds it and falls back to the processor for good.
+//
+// logits_csr(ptr, idx, val, w, out, rows), one thread per row r:
+//     out[r] = sum over k in [ptr[r], ptr[r + 1]) of w[idx[k]] * val[k], in index order, starting from 0.0.
+//   mul.rn and add.rn round each product and each sum on its own; PTX never fuses instructions that carry an explicit
+//   rounding modifier into a multiply-add. That is exactly what the processor's Csr::row_dot does, so the GPU's
+//   logits are bit-identical to the processor's.
+//   ptr: u64[rows + 1], idx: u32[nnz], val: f64[nnz], w: f64[dim], out: f64[rows].
+//
+// scatter(idx, val, w, n), one thread per k < n:
+//     w[idx[k]] = val[k]
+//   The weights stay on the card between calls; only those that changed since the last call are sent.
+//
+
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry logits_csr(
+	.param .u64 logits_csr_ptr,
+	.param .u64 logits_csr_idx,
+	.param .u64 logits_csr_val,
+	.param .u64 logits_csr_w,
+	.param .u64 logits_csr_out,
+	.param .u32 logits_csr_rows
+)
+{
+	.reg .pred 	%p<3>;
+	.reg .b32 	%r<7>;
+	.reg .b64 	%rd<22>;
+	.reg .f64 	%fd<5>;
+
+	ld.param.u64 	%rd1, [logits_csr_ptr];
+	ld.param.u64 	%rd2, [logits_csr_idx];
+	ld.param.u64 	%rd3, [logits_csr_val];
+	ld.param.u64 	%rd4, [logits_csr_w];
+	ld.param.u64 	%rd5, [logits_csr_out];
+	ld.param.u32 	%r1, [logits_csr_rows];
+	// r = blockIdx.x * blockDim.x + threadIdx.x
+	mov.u32 	%r2, %ctaid.x;
+	mov.u32 	%r3, %ntid.x;
+	mov.u32 	%r4, %tid.x;
+	mad.lo.s32 	%r5, %r2, %r3, %r4;
+	setp.ge.u32 	%p1, %r5, %r1;
+	@%p1 bra 	$L_done;
+	cvta.to.global.u64 	%rd6, %rd1;
+	cvta.to.global.u64 	%rd7, %rd2;
+	cvta.to.global.u64 	%rd8, %rd3;
+	cvta.to.global.u64 	%rd9, %rd4;
+	cvta.to.global.u64 	%rd10, %rd5;
+	// k = ptr[r], end = ptr[r + 1]
+	mul.wide.u32 	%rd11, %r5, 8;
+	add.s64 	%rd12, %rd6, %rd11;
+	ld.global.u64 	%rd13, [%rd12];
+	ld.global.u64 	%rd14, [%rd12+8];
+	// s = 0.0
+	mov.f64 	%fd1, 0d0000000000000000;
+	setp.ge.u64 	%p2, %rd13, %rd14;
+	@%p2 bra 	$L_store;
+$L_loop:
+	// j = idx[k]
+	shl.b64 	%rd15, %rd13, 2;
+	add.s64 	%rd16, %rd7, %rd15;
+	ld.global.u32 	%r6, [%rd16];
+	// w[j]
+	mul.wide.u32 	%rd17, %r6, 8;
+	add.s64 	%rd18, %rd9, %rd17;
+	ld.global.f64 	%fd2, [%rd18];
+	// val[k]
+	shl.b64 	%rd19, %rd13, 3;
+	add.s64 	%rd20, %rd8, %rd19;
+	ld.global.f64 	%fd3, [%rd20];
+	// s = s + w[j] * val[k], each rounded on its own
+	mul.rn.f64 	%fd4, %fd2, %fd3;
+	add.rn.f64 	%fd1, %fd1, %fd4;
+	add.s64 	%rd13, %rd13, 1;
+	setp.lt.u64 	%p2, %rd13, %rd14;
+	@%p2 bra 	$L_loop;
+$L_store:
+	add.s64 	%rd21, %rd10, %rd11;
+	st.global.f64 	[%rd21], %fd1;
+$L_done:
+	ret;
+}
+
+.visible .entry scatter(
+	.param .u64 scatter_idx,
+	.param .u64 scatter_val,
+	.param .u64 scatter_w,
+	.param .u32 scatter_n
+)
+{
+	.reg .pred 	%p<2>;
+	.reg .b32 	%r<7>;
+	.reg .b64 	%rd<13>;
+	.reg .f64 	%fd<2>;
+
+	ld.param.u64 	%rd1, [scatter_idx];
+	ld.param.u64 	%rd2, [scatter_val];
+	ld.param.u64 	%rd3, [scatter_w];
+	ld.param.u32 	%r1, [scatter_n];
+	// k = blockIdx.x * blockDim.x + threadIdx.x
+	mov.u32 	%r2, %ctaid.x;
+	mov.u32 	%r3, %ntid.x;
+	mov.u32 	%r4, %tid.x;
+	mad.lo.s32 	%r5, %r2, %r3, %r4;
+	setp.ge.u32 	%p1, %r5, %r1;
+	@%p1 bra 	$L_end;
+	cvta.to.global.u64 	%rd4, %rd1;
+	cvta.to.global.u64 	%rd5, %rd2;
+	cvta.to.global.u64 	%rd6, %rd3;
+	// j = idx[k]
+	mul.wide.u32 	%rd7, %r5, 4;
+	add.s64 	%rd8, %rd4, %rd7;
+	ld.global.u32 	%r6, [%rd8];
+	// v = val[k]
+	mul.wide.u32 	%rd9, %r5, 8;
+	add.s64 	%rd10, %rd5, %rd9;
+	ld.global.f64 	%fd1, [%rd10];
+	// w[j] = v
+	mul.wide.u32 	%rd11, %r6, 8;
+	add.s64 	%rd12, %rd6, %rd11;
+	st.global.f64 	[%rd12], %fd1;
+$L_end:
+	ret;
+}

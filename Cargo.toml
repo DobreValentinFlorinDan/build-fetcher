@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+# desktop/tauri is a member (one lockfile, one target folder) but not a default member: `cargo test` on Linux never
+# needs WebKitGTK; Windows CI builds it with `tauri build`.
+members = ["crates/core", "crates/store", "crates/learn", "crates/server", "crates/desktop", "desktop/tauri"]
+default-members = ["crates/core", "crates/store", "crates/learn", "crates/server", "crates/desktop"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+rusqlite = { version = "0.41", features = ["bundled", "functions", "blob", "backup"] }
+zstd = "0.13"
+sha2 = "0.10"
+crc32fast = "1"
+rayon = "1"
+parking_lot = "0.12"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+tempfile = "3"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+futures-util = "0.3"
+fs2 = "0.4"
+filetime = "0.2"
+indexmap = { version = "2", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+flate2 = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+debug = false
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+opt-level = 2
+debug = "line-tables-only"

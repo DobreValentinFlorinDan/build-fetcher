@@ -1,0 +1,3 @@
+# Windows: the C runtime linked into the app, so it starts without the Visual C++ redistributable installed.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

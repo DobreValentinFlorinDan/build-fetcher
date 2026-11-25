@@ -1,0 +1,38 @@
+[package]
+name = "bf-core"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+futures-util.workspace = true
+sysinfo.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+zstd.workspace = true
+flate2.workspace = true
+sha2.workspace = true
+crc32fast.workspace = true
+rayon.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
+libloading = "0.8"
+# Arbitrary-precision floats (MIT/Apache-2.0): the rare exp/log calls the double-double paths in jsmath can't round for sure.
+dashu-float = "0.4"
+dashu-int = "0.4"
+dashu-base = "0.4"
+fs2.workspace = true
+filetime.workspace = true
+indexmap.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+mimalloc = { version = "0.1.52", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[lib]
+name = "bf_core"

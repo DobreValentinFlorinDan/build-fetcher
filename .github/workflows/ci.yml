@@ -1,0 +1,83 @@
+# Checks every pull request, every push to main and to the claude/ branches: the Rust workspace's tests (core, store,
+# learn, server, desktop logic) and the web app's (typecheck, unit tests, the Vite build), on Linux and on Windows,
+# where the app ships. On Windows the desktop app (Tauri, not a default member) and its NSIS installer are built too.
+# Tests run offline: they read the Data Dragon snapshot in fixtures/, never the CDN.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'claude/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: cargo test, web (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - name: Web tests (typecheck, unit tests)
+        run: npm run test:web
+      - name: Web build
+        run: npm run build
+
+      # The toolchain comes from rust-toolchain.toml.
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: cargo test
+        run: cargo test --locked --no-fail-fast
+
+      # Tauri downloads NSIS from GitHub when its tools folder lacks it; that one download kept failing (HTTP 504,
+      # 2026-11-08). The runner's own NSIS 3 (preinstalled on windows-latest) fills the folder instead, and Tauri
+      # then fetches only its small plugin DLL. Without a preinstalled NSIS nothing changes: Tauri downloads its own.
+      - name: NSIS for Tauri (the runner's own)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $src = @("${env:ProgramFiles(x86)}\NSIS", "$env:ProgramFiles\NSIS") | Where-Object { Test-Path "$_\makensis.exe" } | Select-Object -First 1
+          $dst = Join-Path $env:LOCALAPPDATA 'tauri\NSIS'
+          if ($src -and -not (Test-Path "$dst\makensis.exe")) {
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item -Recurse -Force "$src\*" $dst
+            Write-Host "NSIS from $src"
+            & "$dst\makensis.exe" /VERSION
+          } else {
+            Write-Host "No preinstalled NSIS, or Tauri's folder has one already: nothing to do"
+          }
+      # The installer as release.yml builds it (NSIS, per-user), kept for 14 days so it can be tried before a merge.
+      - name: Desktop app and installer (Tauri NSIS)
+        if: runner.os == 'Windows'
+        working-directory: desktop/tauri
+        run: npx tauri build --bundles nsis
+      - name: Keep the installer
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: target/release/bundle/nsis/*.exe
+          retention-days: 14
+          if-no-files-found: error

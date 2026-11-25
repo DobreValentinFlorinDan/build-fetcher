@@ -1,0 +1,41 @@
+{
+  "name": "build-fetcher",
+  "productName": "Build Fetcher",
+  "version": "1.0.0",
+  "description": "League of Legends builds for any champion and role, learned on your PC from games fetched with your own Riot API key",
+  "author": "Build Fetcher",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c magenta,cyan \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "cargo run --release -p bf-server",
+    "dev:web": "vite",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "cargo test --workspace --exclude build-fetcher",
+    "test:web": "npm run typecheck && tsx --test web/src/*.test.ts",
+    "build": "vite build",
+    "desktop": "vite build && cargo run -p build-fetcher",
+    "dist": "vite build && tauri build --config desktop/tauri/tauri.conf.json",
+    "tauri": "tauri",
+    "icon": "node scripts/make-icon.mjs",
+    "gpu:ptx": "tsx scripts/build-ptx.ts"
+  },
+  "dependencies": {
+    "koffi": "3.3.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@tauri-apps/cli": "2.12.4",
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2"
+  }
+}

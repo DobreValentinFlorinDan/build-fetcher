@@ -13,7 +13,7 @@ use crate::logistic::{LogisticModel, TrainOptions};
 use crate::metrics::{evaluation, fmt_metrics, Evaluation, Guardrail};
 use crate::nn::{NetOptions, SharedNet};
 use anyhow::{anyhow, Result};
-use bf_core::build::{Activity, DataSource, Metrics, ModelStatus, Role};
+use bf_core::build::{Activity, DataSource, MatchRecord, Metrics, ModelStatus, Role};
 use bf_core::ddragon::StaticData;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -428,7 +428,11 @@ impl Learner {
         if let Some(p) = src.current_patch()? {
             clock.observe_patch(p);
         }
-        let fresh: Vec<Sample> = records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        // About one record in CALIB_HOLDOUT (by match id, so the same data split the same way) is kept out of training
+        // to fit the per-window calibration; the validation sample stays untouched for the guardrail.
+        let (cal_records, train_records): (Vec<&MatchRecord>, Vec<&MatchRecord>) = records.iter().partition(|r| fnv(&r.match_id) % CALIB_HOLDOUT == 0);
+        let fresh: Vec<Sample> = train_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        let cal: Vec<Sample> = cal_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
         let n_records = records.len();
         drop(records);
         let val: Vec<Sample> = src.validation_records()?.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
@@ -465,6 +469,8 @@ impl Learner {
             }
         };
         report.batches += batches;
+        let cal_w: Vec<f64> = cal.iter().map(|s| sample_weight(s, &clock, &self.config.weights)).collect();
+        cand.fit_calibration(&cal, &cal_w, self.backend.as_ref());
         let te = Instant::now();
         let before = match &st.logistic {
             Some((_, m)) => evaluate(&self.logits_of(m, &val).iter().map(|z| sigmoid(*z)).collect::<Vec<_>>(), &val),
@@ -692,4 +698,17 @@ impl Learner {
     pub fn samples(&self, records: &[bf_core::build::MatchRecord]) -> Vec<Sample> {
         records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect()
     }
+}
+
+/// One record in this many is held out of training to fit the calibration.
+const CALIB_HOLDOUT: u64 = 7;
+
+/// FNV-1a of a match id: a stable split, whatever the platform.
+fn fnv(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
 }

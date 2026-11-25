@@ -347,3 +347,25 @@ agreement, and write each change in the hand-over section of this file.
   - Open points for the lead: the strict guardrail (log loss and Brier may not rise at all) rejects most updates once
     the model has converged; consider `Guardrail::log_loss_slack` ≈ 1e-4 or a larger validation sample. bf-core has
     no GPU kernel for the training forward pass, so only the recommender's similarities can run on a GPU.
+- (lead, integration, 2026-11-25)
+  - **Merged:** A (`agent-a/store`), B and C. The server wires the real parts in `crates/server/src/wire_store.rs`,
+    `wire_learn.rs` and `wiring.rs` (`BF_FAKES=1` keeps the fakes).
+    - The store opens once Data Dragon is loaded.
+    - Fetching starts after the first run, once a key is set.
+    - Training runs on its own thread only while idle, and clean-up runs after each training cycle.
+    - The store's baseline for tier B counts stays the champion-role win rate. The model's prediction already
+      includes the build options, so using it as the expected win would cancel the effect the counts measure.
+  - **Damage profile:** the store now uses `DamageProfile::of_team` (one rule for counts and queries).
+  - **Learner calibration** (found at integration on the store's synthetic games: every first update rejected for
+    under-confidence late in the game):
+    - a temperature line over game time, fitted on 1 record in 7 held out of training;
+    - changed only when a cluster-robust Wald test passes, with at least 250 held-out matches.
+    - Checkpoint format BFL2.
+    - See MEASUREMENTS.md, "Integration".
+  - **User decisions:**
+    - (1) GPU training: a CUDA forward pass for training and evaluation (hand-written `logits.ptx`, checked by an
+      interpreter test and at run time against the processor), off by default.
+    - (2) The guardrail stays strict ("any metric worse → reject"); the validation sample is doubled to 4,000 games.
+  - **Build tool not used:** compiling the kernel with NVIDIA's NVRTC from PyPI was not done. It is a closed-source
+    binary, and the user's rules ask before such tools, so the PTX was written by hand.
+  - **The key** is read only from Build Fetcher's settings: no `RIOT_API_KEY` variable, and no `.env` file.

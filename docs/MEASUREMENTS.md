@@ -176,23 +176,31 @@ The validation set gives 104,260 examples (10 players × the minutes 2, 8, 14, 2
 
 ### Held-out metrics (20,000 matches, 10 updates of 2,000 records, 4 threads)
 
-| model | log loss | Brier | calibration error 0-10 / 10-20 / 20-30 / 30+ min |
+These are the numbers after integration, with the calibration line added (see "Integration" below). The figures Agent B
+measured before it are in the second table for comparison.
+
+| model (after integration, 2026-11-25) | log loss | Brier | calibration error 0-10 / 10-20 / 20-30 / 30+ min |
 |---|---|---|---|
 | baseline: champion-role win rate | 0.68988 | 0.24837 | 0.0052 / 0.0052 / 0.0047 / 0.0087 |
-| step 1: logistic per champion-role, shrunk to global | 0.49759 | 0.16845 | 0.0089 / 0.0213 / 0.0135 / 0.0322 |
-| step 1 + step 2: shared network on top | **0.49672** | **0.16800** | 0.0058 / 0.0189 / 0.0099 / 0.0288 |
+| step 1: logistic per champion-role, shrunk to global | 0.49708 | 0.16815 | 0.0059 / 0.0176 / 0.0138 / 0.0209 |
+| step 1 + step 2: shared network on top | **0.49697** | **0.16814** | 0.0044 / 0.0186 / 0.0127 / 0.0219 |
 
+| model (Agent B, before integration) | log loss | Brier | calibration error 0-10 / 10-20 / 20-30 / 30+ min |
+|---|---|---|---|
+| step 1 | 0.49759 | 0.16845 | 0.0089 / 0.0213 / 0.0135 / 0.0322 |
+| step 1 + step 2 | 0.49672 | 0.16800 | 0.0058 / 0.0189 / 0.0099 / 0.0288 |
+
+- On this set the calibration line found no significant change (the Wald test never passed), so the model is the
+  same kind as before. The differences come from training on 6 of every 7 new records (the 7th is held out for the
+  calibration). Results: 6 of 10 updates accepted (logistic in 1, 2, 3, 8, 9; network in 3, 6, 9), against 4 of 10
+  before.
 - The baseline's calibration error is low because it predicts nearly the same number for everyone: calibration of a
   near-constant is trivially good. The guardrail therefore compares calibration with a cluster-robust noise floor
   (what a perfectly calibrated model with the same predictions shows by sampling alone; teammates share a label, so
   each match-team counts once). At this validation size the floors were about 0.009 / 0.015 / 0.012 / 0.023.
-- Step 2 shipped in updates 2 and 6, each time beating step 1 on log loss, Brier and every calibration window. On
-  the 6,000-match runs it never beat step 1 by the guardrail's rules, so step 1 alone was served there.
-- Accepted / rejected updates (logistic, network): 1 ✓✗, 2 ✓✓, 3 ✓✗, 4 ✗✗, 5 ✗✗, 6 ✓✓, 7-10 ✗✗. Once the model has
-  converged, the strict "no metric worse" rule rejects most updates on noise (log loss 0.49786 vs 0.49759). That is
-  the rule as specified; it keeps a good model but can stall learning on new patches. A small tolerance
-  (`Guardrail::log_loss_slack`, e.g. 1e-4) or a larger validation sample would let it move; left at 0 for the lead
-  to decide.
+- Once the model has converged, the strict "no metric worse" rule rejects updates on noise (update 5: log loss
+  0.49874 vs 0.49837). The user chose to keep the rule strict and double the store's validation sample (2,000 to 4,000
+  games) instead; this measurement uses its own 2,000-match validation set.
 
 ### Planted effects recovered (20,000 matches)
 
@@ -225,7 +233,7 @@ state. On 4,000 matches the test suite checks that the model ranks Conqueror fir
   the examples (the new ones, 60,000 replayed, and the 104,000 validation examples); it scales with records per
   update and the validation size. With 500 records per update and 1,000 validation matches the process peaked at
   382 MB including 6,000 matches of synthetic data. The models themselves are 14 MB (step 1 with optimiser state)
-  and 1.3 MB (step 2) in memory, 2.9 MB for all checkpoints on disk (zstd).
+  and 1.3 MB (step 2) in memory, 2.9 MB for all checkpoints on disk (zstd; 4.2 MB after integration's run, with more accepted versions).
 - A first update from 500 records was rejected four times before one beat the baseline on every metric (the replay
   sample grows meanwhile): cold start wants a first batch of ~2,000 records.
 
@@ -233,9 +241,9 @@ state. On 4,000 matches the test suite checks that the model ranks Conqueror fir
 
 | call | time |
 |---|---|
-| `recommend`, tier A (model: 5 sections × 8 options × 64 situations) | 2.9-5.7 ms |
-| `recommend`, tier B (counts only) | 0.1-0.2 ms |
-| `live` (model and counts) | 0.6-1.1 ms |
+| `recommend`, tier A (model: 5 sections × 8 options × 64 situations) | 2.9-5.7 ms (7.2 ms after integration) |
+| `recommend`, tier B (counts only) | 0.1-0.2 ms (0.5 ms after integration) |
+| `live` (model and counts) | 0.6-1.1 ms (1.0 ms after integration) |
 
 ### Not verified
 
@@ -248,3 +256,74 @@ state. On 4,000 matches the test suite checks that the model ranks Conqueror fir
   kernel for the training forward pass, so training runs on the processor even with a GPU.
 - **burn / candle** were not evaluated: the network is ~52,000 parameters in plain Rust and deterministic as it is.
 - **Windows.** Measured on Linux only; peak memory comes from /proc (not reported on Windows).
+
+## Integration (lead)
+
+The lead, 2026-11-25. Same machine: 4 cores, 15 GB, no GPU. The three parts run wired together, as `wiring.rs`
+connects them.
+
+### Store → learner → recommender on the store's synthetic games
+
+```
+cargo test --release -p bf-server --test integration -- --nocapture
+```
+
+The input is 4,000 `bf_core::testkit::Synth` games: half with timelines, Irelia mid in a third of them, 3% with a
+defect. They go through the real `Store`, then the real `Learner` trains on it, then the real `Recommender` answers.
+
+| step | result |
+|---|---|
+| ingestion | 4,000 games in 5.1 s; 2,460 records kept (tier A + timelines), 117 dropped by the filters; 50 re-sent games all duplicates |
+| first update (2,000 records) | **accepted**: log loss 0.699 → 0.486, Brier 0.253 → 0.163; calibration temperature 1.43 + 0.50 per 10 minutes |
+| second update (460 records) | rejected (log loss 0.4885 > 0.4856): the strict rule |
+| recommendations | Irelia mid from the model (tier A), ≥ 5 sections with options; the thinnest pair (Nocturne mid, 8 games) from counts with 45 options flagged thin |
+| clean-up after training | 30.3 MB → 20.5 MB (9.8 MB freed) in 84 ms; validation sample intact |
+
+**What integration found and fixed.** On these games every first update was rejected at first. Log loss and Brier
+improved a lot, but calibration error per window rose from about 0.03 to 0.08-0.11: the game state is very
+informative late in Synth's games, and one update's Adam steps left the model under-confident there. The fix is a
+calibration line over game time, (a0 + a1 · t) · z, fitted on 1 record in 7 held out of training (never the
+validation sample).
+- It changes only when a Wald test with a cluster-robust covariance (matches as clusters) passes at 95%, with at
+  least 250 held-out matches.
+- Two earlier attempts each fixed one synthetic set and broke the other. A per-window fit counted examples one by one
+  and overfitted small windows (one match gives dozens of examples with one outcome). A faster learning rate for the
+  state weights made small early updates over-confident on the learner's own set.
+
+### The app, headless, with the real parts
+
+```
+cargo build --release -p bf-server
+BF_CONFIG_DIR=<empty folder> BF_IRELIA_CONFIG_DIR=<empty folder> PORT=5199 target/release/bf-server
+```
+
+- First `/api/health` answer **33 ms** after start.
+- Data Dragon 16.23.1 (173 champions, 863 items) loaded from the CDN; then the database opened and the learner
+  started on the CPU.
+- Without a key, fetching shows `paused: "no API key"`.
+- Resident memory **22 MB** at start and **48 MB** idle after 30 s (peak 50 MB).
+- On disk: 1.2 MB (the empty database, 0.9 MB of Data Dragon JSON).
+
+### Disk and request budget, extrapolated (not measured on real data)
+
+These use the store's own figures, about 1 KB of database per counted game and 1.58 requests per new game.
+- At the key's limit, each routing value (EUROPE, ASIA) gives about 41,000 games a day with the key to itself, and
+  about 23,700 while Irelia Companion spends 40 requests every 2 minutes.
+- So with both routing values the database grows by about 50-80 MB a day before clean-up.
+- At the default 2 GB budget, clean-up starts trimming the oldest patches after roughly 3.5-6 weeks, two to three
+  patches.
+- Real timelines are bigger than synthetic ones: the store expects 2-3 KB per kept record, not measured.
+
+### Not verified (whole project)
+
+- **Real Riot data and 24 hours of real fetching.** No real API key was used anywhere (by rule, and none is available
+  in the build environment). Requests per day, matches per day, real record sizes, the data-quality thresholds on
+  real games, and model quality on real games remain to be measured on the user's PC.
+- **A real GPU.** There is no GPU on the build machine.
+  - The CUDA forward-pass kernel (hand-written PTX) was checked by an interpreter against the processor, bit for bit.
+  - Not checked: the driver compiling it, and its speed.
+  - The similarity kernel is irelia-companion's, proven there.
+  - GPU update times: not measured.
+- **Windows.** All measurements here are Linux. CI builds and tests on Windows (and builds the NSIS installer), but
+  memory, timings, the overlay on a running game, the tray and the League client import were not exercised on
+  Windows.

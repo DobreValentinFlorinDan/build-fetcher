@@ -15,6 +15,7 @@
 //!    &OtherParts::standard(&data_dir, Some(&logs_dir)))`; `store.storage_status(budget, &other)` → `StorageStatus`.
 #![recursion_limit = "512"]
 
+pub mod backup;
 pub mod cleanup;
 pub mod db;
 pub mod key_import;

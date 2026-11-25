@@ -10,6 +10,9 @@ fn main() {
         "overlay_set_visible",
         "overlay_set_click_through",
         "overlay_fit_height",
+        "backup_pick_save",
+        "backup_pick_open",
+        "restart_app",
     ])))
     .expect("tauri build");
 }

@@ -44,6 +44,18 @@ trademarks or registered trademarks of Riot Games, Inc.
 Settings, the database, Data Dragon, model checkpoints and logs live in `%APPDATA%\build-fetcher`. The uninstaller
 keeps that folder. Delete it by hand to start over.
 
+### Moving to another PC, or keeping a copy
+
+Settings → Storage → **Export…** writes one zip with your settings, games, counts and model. The Riot API key is
+included only if you tick "Include my Riot API key". Data Dragon and logs are left out. The app keeps fetching and
+learning meanwhile.
+
+On the other PC, **Import…** checks the zip, then applies it at the next start (**Restart now**):
+- The data that was there is kept aside in `%APPDATA%\build-fetcher\before-import` until the next import.
+- Without a key in the zip, that PC keeps its own key.
+- A zip that isn't a Build Fetcher backup, or that comes from a newer version, or holds a damaged database or
+  unexpected files, is refused before anything is changed.
+
 ## How it works
 
 ```

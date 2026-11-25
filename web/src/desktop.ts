@@ -13,6 +13,9 @@ export type DesktopSettings = {
 export type Bridge = {
   info(): Promise<DesktopInfo>;
   openFolder(path: string): Promise<void>;
+  /** Native file dialogs for Settings → Storage; null when cancelled. */
+  backup: { pickSave(name: string): Promise<string | null>; pickOpen(): Promise<string | null> };
+  restart(): Promise<void>;
   settings: { get(): Promise<DesktopSettings>; set(patch: unknown): Promise<DesktopSettings> };
   overlay: {
     state(): Promise<OverlayState>;

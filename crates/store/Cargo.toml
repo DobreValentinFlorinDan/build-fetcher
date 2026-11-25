@@ -17,6 +17,7 @@ rusqlite.workspace = true
 zstd.workspace = true
 parking_lot.workspace = true
 tokio.workspace = true
+chrono.workspace = true
 rayon.workspace = true
 
 [dev-dependencies]

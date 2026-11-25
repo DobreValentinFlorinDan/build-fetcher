@@ -20,9 +20,17 @@ pub async fn default_handles(ctx: &WiringContext<'_>) -> anyhow::Result<Handles>
         (ctx.starting)("Starting with sample data…");
         return Ok(crate::fakes::handles(ctx.static_data.clone()));
     }
-    (ctx.starting)("Opening the database…");
     let settings_file = bf_store::settings::settings_file();
     let data_dir = bf_core::config::config().data_dir;
+    // A backup imported before the last restart goes in place now, before anything opens the database.
+    if let Some(config_dir) = settings_file.parent() {
+        match bf_store::backup::apply_pending_import(config_dir, &data_dir, &settings_file) {
+            Ok(Some(a)) => crate::bf_log!("[backup] imported the backup made by {} (the data it replaced is in {})", a.summary.version, a.previous.display()),
+            Ok(None) => {}
+            Err(e) => crate::bf_log!("[backup] the staged import could not be applied: {}", crate::routes::scrub(&format!("{e:#}"))),
+        }
+    }
+    (ctx.starting)("Opening the database…");
     let store = RealStore::new(settings_file.clone(), data_dir.clone(), logs_dir(&settings_file));
     store.open_when_ready(ctx.static_data.clone());
     let learner = RealLearner::new(data_dir.join("checkpoints"));

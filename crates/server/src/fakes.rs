@@ -28,11 +28,12 @@ pub struct FakeStore {
     pub activity: Mutex<Vec<Activity>>,
     pub account: Mutex<Option<OwnAccount>>,
     pub games_ended: Mutex<u32>,
+    pub pending: Mutex<Option<bf_store::backup::ImportSummary>>,
 }
 
 impl Default for FakeStore {
     fn default() -> Self {
-        FakeStore { settings: Mutex::new(AppSettings::default()), activity: Mutex::new(vec![]), account: Mutex::new(None), games_ended: Mutex::new(0) }
+        FakeStore { settings: Mutex::new(AppSettings::default()), activity: Mutex::new(vec![]), account: Mutex::new(None), games_ended: Mutex::new(0), pending: Mutex::new(None) }
     }
 }
 
@@ -109,6 +110,29 @@ impl StoreHandle for FakeStore {
     }
     fn game_ended(&self) {
         *self.games_ended.lock() += 1;
+    }
+    /// Writes a small stand-in file (not a real archive): the routes' contract, not the format, is tested here.
+    fn export_backup(&self, path: &std::path::Path, include_key: bool) -> anyhow::Result<bf_store::backup::ExportReport> {
+        if path.extension().and_then(|e| e.to_str()) != Some("zip") {
+            anyhow::bail!("The backup file must end in .zip");
+        }
+        std::fs::write(path, b"sample backup")?;
+        Ok(bf_store::backup::ExportReport { path: path.to_path_buf(), bytes: 13, includes_key: include_key, files: 1, millis: 0 })
+    }
+    fn stage_import(&self, path: &std::path::Path) -> anyhow::Result<bf_store::backup::ImportSummary> {
+        if !path.is_file() {
+            anyhow::bail!("No file at {}", path.display());
+        }
+        let s = bf_store::backup::ImportSummary { version: "1.0.0".into(), created_ms: 0, includes_key: false, database_bytes: 13, checkpoint_files: 0 };
+        *self.pending.lock() = Some(s.clone());
+        Ok(s)
+    }
+    fn pending_import(&self) -> Option<bf_store::backup::ImportSummary> {
+        self.pending.lock().clone()
+    }
+    fn cancel_import(&self) -> anyhow::Result<()> {
+        *self.pending.lock() = None;
+        Ok(())
     }
 }
 

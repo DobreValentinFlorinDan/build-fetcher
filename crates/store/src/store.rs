@@ -168,6 +168,14 @@ impl Store {
         })
     }
 
+    /// A consistent, compacted copy of the database at `path` (SQLite's `VACUUM INTO`, on the reading connection, so
+    /// ingestion can go on). `path` must not exist yet.
+    pub fn snapshot_to(&self, path: &Path) -> Result<()> {
+        let r = self.r.lock();
+        r.db.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])?;
+        Ok(())
+    }
+
     pub fn set_static_data(&self, data: Arc<StaticData>) {
         *self.data.write() = data;
     }

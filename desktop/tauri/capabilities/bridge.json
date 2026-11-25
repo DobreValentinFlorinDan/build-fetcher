@@ -13,6 +13,9 @@
     "allow-overlay-state",
     "allow-overlay-set-visible",
     "allow-overlay-set-click-through",
-    "allow-overlay-fit-height"
+    "allow-overlay-fit-height",
+    "allow-backup-pick-save",
+    "allow-backup-pick-open",
+    "allow-restart-app"
   ]
 }

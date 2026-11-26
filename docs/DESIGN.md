@@ -539,3 +539,11 @@ agreement, and write each change in the hand-over section of this file.
   - **Filling it:** `Learner::refresh_team(src)` runs at attach (`wire_learn.rs`). It counts the stored timeline
     games, so the numbers are there before the first game of the run. `absorb` keeps them current.
   - **Web:** the `TeamCard` in `pages.tsx` shows a bar while dormant and the state once awake.
+- (lead, 2026-11-26, 1.3.2) **Team network count; calibration on every check** (user report: stuck at 1,200 at 100%
+  timelines).
+  - **Count:** progress was `max(timeline_seen + draft.timeline, stored)`. It is now `timeline_seen + draft.timeline`,
+    with `timeline_seen` raised to at least the stored count once per run, in `absorb` and `refresh_team`. This is
+    idempotent across restarts, because it takes a max with the stored count rather than adding it.
+    - **Known over-count:** timeline records stored but not yet read when a run starts.
+  - **`check`** logs the pool size and the fitted temperature, saying whether the fit ran (`CALIB_MIN_GAMES` is now
+    public).

@@ -117,7 +117,10 @@ export type ImportSummary = { version: string; createdMs: number; includesKey: b
 /** `games` counts examples (a player at a minute of a test match); `matches` the test matches (0 before 1.1.1). */
 export type Metrics = { games: number; matches: number; logLoss: number; brier: number; calibration: number[] };
 export type CheckpointInfo = { version: string; kind: string; createdMs: number; metrics: Metrics; recordsSeen: number; active: boolean };
-export type ModelStatus = { learning: boolean; backend: string; checkpoints: CheckpointInfo[]; log: string[] };
+/** Step 3, the team network (1.3.1): dormant until `threshold` games with a timeline, then awake. */
+export type TeamProgress = { awake: boolean; games: number; threshold: number; inForce: string | null; backlog: number };
+
+export type ModelStatus = { learning: boolean; backend: string; checkpoints: CheckpointInfo[]; log: string[]; team?: TeamProgress | null };
 
 export type PairVolume = { champion: number; role: Role; patch: Patch; games: number; wins: number; newestMs: number };
 

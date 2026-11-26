@@ -766,6 +766,22 @@ pub struct ModelStatus {
     pub checkpoints: Vec<CheckpointInfo>,
     /// The newest lines of the learning log ("v12 rejected: log loss 0.6712 > 0.6705").
     pub log: Vec<String>,
+    /// The team network (step 3, 1.3.1): dormant with its progress, or awake.
+    #[serde(default)]
+    pub team: Option<TeamProgress>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamProgress {
+    pub awake: bool,
+    /// Games with a timeline so far (stored or learnt), and the number that wakes it up.
+    pub games: u64,
+    pub threshold: u64,
+    /// The version in force, once one passed a check.
+    pub in_force: Option<String>,
+    /// Stored games it still has to go through, once awake (approximate).
+    pub backlog: u64,
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ import { api, useGet } from './api.ts';
 import { BudgetMeter, BuildView, Card, ChampionIcon, ChampionPicker, ErrorText, RolePicker } from './components.tsx';
 import { useDd } from './ddragon.ts';
 import { ago, bytes, count, dataAge, ROLE_NAMES } from './format.ts';
-import type { BuildRecommendation, DraftState, ImportResult, ModelStatus, PairVolume, Role, SettingsView, StorageStatus, Status } from './types.ts';
+import type { BuildRecommendation, DraftState, ImportResult, ModelStatus, PairVolume, TeamProgress, Role, SettingsView, StorageStatus, Status } from './types.ts';
 
 // ---------------------------------------------------------------- import into the client
 
@@ -287,6 +287,30 @@ export function RollbackButtons({ model, onDone }: { model: ModelStatus; onDone:
   );
 }
 
+/** The team network's progress: a bar towards its wake-up threshold, then its state once awake. */
+function TeamCard({ t }: { t: TeamProgress }) {
+  const share = Math.min(1, t.games / Math.max(1, t.threshold));
+  return (
+    <Card title="Team network" right={<span className="text-xs text-muted">{t.awake ? (t.inForce ? `${t.inForce} in force` : 'awake, not in force yet') : 'dormant'}</span>}>
+      {t.awake ? (
+        <p className="text-sm text-muted">
+          Awake and learning every new game. {t.backlog > 0 ? `About ${count(t.backlog)} stored games still to go through. ` : ''}
+          {t.inForce ? 'It passed a check and now adds to the in-game advice.' : 'It goes live once it passes a check on held-out games.'}
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          <div className="flex h-2.5 overflow-hidden rounded bg-raised" role="meter" aria-valuenow={t.games} aria-valuemax={t.threshold} aria-label="Games with a timeline towards the team network">
+            <div className="bg-accent" style={{ width: `${(share * 100).toFixed(2)}%` }} />
+          </div>
+          <p className="text-xs text-muted">
+            {count(t.games)} of {count(t.threshold)} games with a timeline ({(share * 100).toFixed(1)}%). It wakes up on its own at {count(t.threshold)}; a higher timeline share in Settings gets there sooner.
+          </p>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function ModelPage() {
   const m = useGet<ModelStatus>('/api/model', 15_000);
   const [model, setModel] = useState<ModelStatus | null>(null);
@@ -298,6 +322,7 @@ export function ModelPage() {
         <p className="mb-3 text-xs text-muted">Each update is checked on held-out games; one that does worse on any metric is rejected and the previous checkpoint stays.</p>
         {model.checkpoints.length === 0 ? <p className="text-sm text-muted">No checkpoint yet: builds come from counts until the first model is trained.</p> : <RollbackButtons model={model} onDone={setModel} />}
       </Card>
+      {model.team && <TeamCard t={model.team} />}
       <Card title="Learning log">
         {model.log.length === 0 ? <p className="text-sm text-muted">Nothing yet.</p> : <ul className="space-y-1 font-mono text-xs text-muted">{model.log.map((l, i) => <li key={i}>{l}</li>)}</ul>}
       </Card>

@@ -166,7 +166,13 @@ impl Default for FakeLearner {
 
 impl LearnerHandle for FakeLearner {
     fn status(&self) -> ModelStatus {
-        ModelStatus { learning: *self.learning.lock(), backend: "cpu".into(), checkpoints: self.checkpoints.lock().clone(), log: self.log.lock().clone() }
+        ModelStatus {
+            learning: *self.learning.lock(),
+            backend: "cpu".into(),
+            checkpoints: self.checkpoints.lock().clone(),
+            log: self.log.lock().clone(),
+            team: Some(bf_core::build::TeamProgress { awake: false, games: 12_345, threshold: 200_000, in_force: None, backlog: 0 }),
+        }
     }
     fn rollback(&self, version: &str) -> anyhow::Result<ModelStatus> {
         {

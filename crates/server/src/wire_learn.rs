@@ -101,6 +101,9 @@ impl RealLearner {
             let source: Arc<dyn DataSource> = db.clone();
             *me.builds.write() = Some(Arc::new(Recommender::new(source, Some(learner.clone()), data, RecommendConfig::default())));
             let _ = me.learner.set(learner.clone());
+            if let Err(e) = learner.refresh_team(&*db) {
+                crate::bf_log!("[learn] counting games for the team network failed: {}", crate::routes::scrub(&e.to_string()));
+            }
             crate::bf_log!("[learn] ready ({})", learner.status().backend);
             let cycle = me.clone();
             std::thread::Builder::new().name("learn".into()).spawn(move || cycle.run(learner, db, st)).ok();

@@ -328,6 +328,7 @@ pub struct Learner {
     waiting: Mutex<Option<String>>,
     /// Step 3's state for the status (dormant with its progress, or awake).
     team_status: Mutex<Option<String>>,
+    team_progress: Mutex<Option<bf_core::build::TeamProgress>>,
 }
 
 /// The process's peak resident memory (VmHWM), where the system says it.
@@ -434,6 +435,7 @@ impl Learner {
             last_update: Mutex::new(Instant::now()),
             waiting: Mutex::new(None),
             team_status: Mutex::new(None),
+            team_progress: Mutex::new(None),
         };
         l.publish(&l.state.lock());
         Ok(l)
@@ -472,6 +474,11 @@ impl Learner {
             backend: self.backend.name(),
             checkpoints: self.manifest.read().infos(),
             log: self.waiting.lock().iter().cloned().chain(self.team_line()).chain(self.store.log_tail(50)).collect(),
+            team: Some(self.team_progress.lock().clone().unwrap_or_else(|| {
+                // Before the first count of this run: what the manifest knows.
+                let m = self.manifest.read();
+                bf_core::build::TeamProgress { awake: m.team_awake, games: m.timeline_seen, threshold: self.config.team.threshold, in_force: m.active_team.clone(), backlog: 0 }
+            })),
         }
     }
 
@@ -776,6 +783,7 @@ impl Learner {
             }
         }
         *self.team_status.lock() = Some(self.team_text(&st, progress));
+        *self.team_progress.lock() = Some(self.team_numbers(&st, progress));
         draft.cursor = cursor;
         draft.records += records.len();
         draft.since_check += records.len();
@@ -851,6 +859,28 @@ impl Learner {
             let force = st.team.as_ref().map(|(v, _)| format!("{v} in force")).unwrap_or_else(|| "none in force yet".into());
             format!("Team network: awake, learning ({force}); stored games still to go through: about {backlog}.")
         }
+    }
+
+    fn team_numbers(&self, st: &State, progress: u64) -> bf_core::build::TeamProgress {
+        bf_core::build::TeamProgress {
+            awake: st.manifest.team_awake,
+            games: progress,
+            threshold: self.config.team.threshold,
+            in_force: st.team.as_ref().map(|(v, _)| v.clone()),
+            backlog: if st.manifest.team_awake { st.manifest.cursor.saturating_sub(st.manifest.team_cursor) } else { 0 },
+        }
+    }
+
+    /// Counts the stored games with a timeline and fills the team network's status, so the Model page shows its
+    /// progress from the start (before the first game of this run is learnt).
+    pub fn refresh_team(&self, src: &dyn DataSource) -> Result<()> {
+        let mut st = self.state.lock();
+        let stored = src.timeline_count()?;
+        st.stored_timelines = Some(stored);
+        let progress = (st.manifest.timeline_seen + st.draft.as_ref().map(|d| d.timeline).unwrap_or(0)).max(stored);
+        *self.team_status.lock() = Some(self.team_text(&st, progress));
+        *self.team_progress.lock() = Some(self.team_numbers(&st, progress));
+        Ok(())
     }
 
     /// Step 3's line for the status (None before the first continuous-learning call of this run).

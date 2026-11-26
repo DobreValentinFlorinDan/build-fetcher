@@ -114,6 +114,7 @@ impl RealLearner {
     fn run(self: Arc<Self>, learner: Arc<Learner>, db: Arc<bf_store::Store>, store: Arc<RealStore>) {
         let mut last_rescore: Option<std::time::Instant> = None;
         let mut last_cleanup: Option<std::time::Instant> = None;
+        let mut last_team_count = std::time::Instant::now();
         let mut checked_since_cleanup = false;
         let policy = CheckPolicy { every: CHECK_EVERY, max_wait: Some(CHECK_MAX_WAIT), min_validation: MIN_VALIDATION, ..CheckPolicy::default() };
         loop {
@@ -126,6 +127,13 @@ impl RealLearner {
             }
             let idle = activity == Activity::Idle;
             let mut nothing_new = false;
+            // The team network's count follows fetching, even before the first model (one SQL count a minute).
+            if last_team_count.elapsed() >= Duration::from_secs(60) {
+                last_team_count = std::time::Instant::now();
+                if let Err(e) = learner.refresh_team(&*db) {
+                    crate::bf_log!("[learn] counting games for the team network failed: {}", crate::routes::scrub(&e.to_string()));
+                }
+            }
             if !learner.has_model() {
                 // The first model, from a big batch, while idle.
                 if !idle {

@@ -1017,17 +1017,21 @@ impl Learner {
         let mut cand = d.logistic.clone();
         let cal: Vec<Sample> = st.cal_pool.iter().flatten().cloned().collect();
         let cal_w: Vec<f64> = cal.iter().map(|s| sample_weight(s, &d.clock, &self.config.weights)).collect();
-        let calib_before = cand.calib;
+        let calib_before = (cand.calib, cand.calib_win);
         cand.fit_calibration(&cal, &cal_w, self.backend.as_ref());
         // Whether the correction ran, on every check (1.3.2: only accepted updates showed the temperature).
         let pool = st.cal_pool.len();
         report.log.push(format!(
-            "calibration: {pool} held-out matches in the pool; temperature {:.3} + {:.3} per 10 min ({})",
+            "calibration: {pool} held-out matches in the pool; temperature {:.3} + {:.3} per 10 min, window factors {:.2}/{:.2}/{:.2}/{:.2} ({})",
             cand.calib[0],
             cand.calib[1],
+            cand.calib_win[0],
+            cand.calib_win[1],
+            cand.calib_win[2],
+            cand.calib_win[3],
             if pool < crate::logistic::CALIB_MIN_GAMES {
                 format!("not fitted yet: needs {} matches", crate::logistic::CALIB_MIN_GAMES)
-            } else if cand.calib == calib_before {
+            } else if (cand.calib, cand.calib_win) == calib_before {
                 "fitted, no significant change from the one in force".to_string()
             } else {
                 "fitted".to_string()

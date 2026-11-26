@@ -130,7 +130,7 @@ impl Reader<'_> {
 
 /// A logistic model as bytes: only the slots ever touched (most of the hashed space is zero).
 pub fn encode_logistic(m: &LogisticModel) -> Vec<u8> {
-    let mut b = b"BFL2".to_vec();
+    let mut b = b"BFL3".to_vec();
     put_u64(&mut b, m.t);
     put_u32(&mut b, m.pair_samples.len() as u32);
     for ((c, r), n) in &m.pair_samples {
@@ -140,6 +140,9 @@ pub fn encode_logistic(m: &LogisticModel) -> Vec<u8> {
     }
     put_f64(&mut b, m.calib[0]);
     put_f64(&mut b, m.calib[1]);
+    for f in m.calib_win {
+        put_f64(&mut b, f);
+    }
     let nz: Vec<usize> = (0..DIM).filter(|j| m.w[*j] != 0.0 || m.m[*j] != 0.0 || m.v[*j] != 0.0).collect();
     put_u32(&mut b, nz.len() as u32);
     for j in nz {
@@ -153,10 +156,11 @@ pub fn encode_logistic(m: &LogisticModel) -> Vec<u8> {
 
 pub fn decode_logistic(b: &[u8]) -> Result<LogisticModel> {
     let mut r = Reader { b, at: 0 };
-    // BFL1 (no calibration: identity) or BFL2.
+    // BFL1 (no calibration: identity), BFL2 (the line) or BFL3 (the line and the window factors, 1.3.3).
     let version = match r.take(4)? {
         b"BFL1" => 1,
         b"BFL2" => 2,
+        b"BFL3" => 3,
         _ => bail!("not a logistic checkpoint"),
     };
     let mut m = LogisticModel { t: r.u64()?, ..Default::default() };
@@ -167,6 +171,11 @@ pub fn decode_logistic(b: &[u8]) -> Result<LogisticModel> {
     }
     if version >= 2 {
         m.calib = [r.f64()?, r.f64()?];
+    }
+    if version >= 3 {
+        for k in 0..4 {
+            m.calib_win[k] = r.f64()?;
+        }
     }
     for _ in 0..r.u32()? {
         let j = r.u32()? as usize;
@@ -349,6 +358,7 @@ mod tests {
         m.t = 9;
         m.pair_samples.insert((39, 0), 12);
         m.calib = [0.8125, 0.0625];
+        m.calib_win = [1.0, 1.25, 0.5, 2.0];
         assert_eq!(decode_logistic(&encode_logistic(&m)).unwrap(), m);
         let n = SharedNet::new(1);
         assert_eq!(decode_nn(&encode_nn(&n)).unwrap(), n);

@@ -253,6 +253,11 @@ pub struct LogisticModel {
     /// model under- or over-confident; seen on synthetic data, the right temperature rises with game time (0.9 to 1.35
     /// on one set, 1.7 to 2.8 on another). A temperature never changes what the weights rank.
     pub calib: [f64; 2],
+    /// A factor per calibration window (0-10, 10-20, 20-30, 30+ min) on top of the line (1.3.3), each changed only
+    /// when its own held-out matches show a significant need: a line can't follow a model that needs ×2 mid-game
+    /// and ×1 late (seen on a user's games, where the line overshot the 30+ window to ×2.8 and every check failed
+    /// there).
+    pub calib_win: [f64; 4],
 }
 
 /// No calibration: a temperature of 1 at every minute.
@@ -264,7 +269,7 @@ fn calib_time(minute: f64) -> f64 {
 
 impl Default for LogisticModel {
     fn default() -> Self {
-        LogisticModel { w: vec![0.0; DIM], m: vec![0.0; DIM], v: vec![0.0; DIM], t: 0, pair_samples: BTreeMap::new(), calib: IDENTITY_CALIB }
+        LogisticModel { w: vec![0.0; DIM], m: vec![0.0; DIM], v: vec![0.0; DIM], t: 0, pair_samples: BTreeMap::new(), calib: IDENTITY_CALIB, calib_win: [1.0; 4] }
     }
 }
 
@@ -275,6 +280,10 @@ impl Default for LogisticModel {
 pub const CALIB_MIN_GAMES: usize = 250;
 /// The Wald statistic a change of the temperature line must exceed: the 95% point of χ² with 2 degrees of freedom.
 const CALIB_WALD: f64 = 5.991;
+/// The same for one window's factor: the 95% point of χ² with 1 degree of freedom.
+const CALIB_WALD_1: f64 = 3.841;
+/// Matches a window needs before its own factor can change.
+pub const CALIB_WINDOW_GAMES: usize = 100;
 
 fn inverse2(m: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
     let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
@@ -312,7 +321,7 @@ impl LogisticModel {
     }
 
     pub fn calibrated(&self, z: f64, minute: f64) -> f64 {
-        (self.calib[0] + self.calib[1] * calib_time(minute)) * z
+        (self.calib[0] + self.calib[1] * calib_time(minute)) * self.calib_win[crate::features::window_of(minute)] * z
     }
 
     /// Refits the calibration on held-out examples: the temperature line (a0, a1) that maximises their weighted log
@@ -336,14 +345,74 @@ impl LogisticModel {
         self.fit_calibration_on(held_out, weights, &z);
     }
 
-    /// `fit_calibration` given the raw logits `z` of the held-out examples.
+    /// `fit_calibration` given the raw logits `z` of the held-out examples: the line, then the per-window factors.
     pub(crate) fn fit_calibration_on(&mut self, held_out: &[Sample], weights: &[f64], z: &[f64]) {
-        // The two inputs of the line for each example: z and z * t.
-        let x: Vec<[f64; 2]> = held_out.iter().zip(z).map(|(s, z)| [*z, *z * calib_time(s.situation.state.minute)]).collect();
         let games = held_out.iter().map(|s| s.game).collect::<std::collections::BTreeSet<u64>>().len();
         if games < CALIB_MIN_GAMES {
             return;
         }
+        let line = self.calib;
+        self.fit_line(held_out, weights, z);
+        if self.calib != line {
+            // The factors were relative to the old line.
+            self.calib_win = [1.0; 4];
+        }
+        self.fit_windows(held_out, weights, z);
+    }
+
+    /// Per window, the factor on the line's logit that maximises the window's weighted log likelihood (Newton, from
+    /// the factor in force). It replaces the one in force only when a cluster-robust Wald test with one degree of
+    /// freedom passes (95%, 3.841), and the window has at least `CALIB_WINDOW_GAMES` matches.
+    fn fit_windows(&mut self, held_out: &[Sample], weights: &[f64], z: &[f64]) {
+        for k in 0..4 {
+            let idx: Vec<usize> = (0..held_out.len()).filter(|i| crate::features::window_of(held_out[*i].situation.state.minute) == k).collect();
+            let games = idx.iter().map(|i| held_out[*i].game).collect::<std::collections::BTreeSet<u64>>().len();
+            if games < CALIB_WINDOW_GAMES {
+                continue;
+            }
+            // The line's logit for each example of the window.
+            let b: Vec<f64> = idx.iter().map(|i| (self.calib[0] + self.calib[1] * calib_time(held_out[*i].situation.state.minute)) * z[*i]).collect();
+            let old = self.calib_win[k];
+            let mut r = old;
+            let mut h = 0.0;
+            for _ in 0..50 {
+                let (mut g, mut hh) = (0.0, 0.0);
+                for (n, i) in idx.iter().enumerate() {
+                    let p = sigmoid(r * b[n]);
+                    g += weights[*i] * (p - held_out[*i].label()) * b[n];
+                    hh += weights[*i] * p * (1.0 - p) * b[n] * b[n];
+                }
+                if !(hh.is_finite() && hh > 0.0) {
+                    break;
+                }
+                let d = g / hh;
+                r -= d;
+                h = hh;
+                if d.abs() < 1e-12 {
+                    break;
+                }
+            }
+            if !(r.is_finite() && r > 0.05 && h > 0.0) {
+                continue;
+            }
+            let mut per_game: BTreeMap<u64, f64> = BTreeMap::new();
+            for (n, i) in idx.iter().enumerate() {
+                let p = sigmoid(r * b[n]);
+                *per_game.entry(held_out[*i].game).or_insert(0.0) += weights[*i] * (p - held_out[*i].label()) * b[n];
+            }
+            let meat: f64 = per_game.values().map(|x| x * x).sum();
+            let var = meat / (h * h);
+            let wald = (r - old) * (r - old) / var;
+            if wald.is_finite() && wald > CALIB_WALD_1 {
+                self.calib_win[k] = r;
+            }
+        }
+    }
+
+    /// The temperature line (see `fit_calibration`).
+    fn fit_line(&mut self, held_out: &[Sample], weights: &[f64], z: &[f64]) {
+        // The two inputs of the line for each example: z and z * t.
+        let x: Vec<[f64; 2]> = held_out.iter().zip(z).map(|(s, z)| [*z, *z * calib_time(s.situation.state.minute)]).collect();
         let old = self.calib;
         let mut th = old;
         let mut hess = [[0.0; 2]; 2];
@@ -572,5 +641,43 @@ mod tests {
         let m = LogisticModel { calib: [1.5, 0.25], ..Default::default() };
         assert_eq!(m.calibrated(2.0, 20.0), 4.0);
         assert_eq!(m.calibrated(2.0, 60.0), m.calibrated(2.0, 40.0));
+        // Under a pure line, the window factors stay at 1 (nothing significant left over).
+        let (s, z) = held_out(2000, [1.4, 0.5], 7);
+        let mut m = LogisticModel::default();
+        m.fit_calibration_on(&s, &vec![1.0; s.len()], &z);
+        assert!(m.calib_win.iter().all(|f| (f - 1.0).abs() < 0.15), "{:?}", m.calib_win);
+    }
+
+    /// 1.3.3, a user's pattern: the model needs ×2 from 10 to 30 minutes and ×1 after 30. The line alone overshoots
+    /// the late window (it can only keep rising); the window factors bring each window to what it needs.
+    #[test]
+    fn window_factors_fix_what_a_line_cannot() {
+        let mut r = Rng(21);
+        let need = |minute: f64| if (10.0..30.0).contains(&minute) { 2.0 } else { 1.0 };
+        let (mut s, mut z) = (vec![], vec![]);
+        for g in 0..1500u64 {
+            for minute in [2.0, 8.0, 14.0, 20.0, 26.0, 32.0, 38.0] {
+                let zi = r.normal() * (0.4 + minute / 25.0);
+                let won = r.uniform() < sigmoid(need(minute) * zi);
+                for (team, w, zz) in [(0u64, won, zi), (1, !won, -zi)] {
+                    let situation = Situation { state: GameState { minute, ..Default::default() }, ..Default::default() };
+                    s.push(Sample { situation, won: w, is_me: false, version: None, rank: None, group: g * 2 + team, game: g, player: 0 });
+                    z.push(zz);
+                }
+            }
+        }
+        let w = vec![1.0; s.len()];
+        let mut line_only = LogisticModel::default();
+        line_only.fit_line(&s, &w, &z);
+        let mut m = LogisticModel::default();
+        m.fit_calibration_on(&s, &w, &z);
+        for (minute, want) in [(14.0, 2.0), (26.0, 2.0), (35.0, 1.0)] {
+            let got = m.calibrated(1.0, minute);
+            assert!((got - want).abs() < 0.25 * want, "{minute} min: {got} vs {want} (line {:?}, windows {:?})", m.calib, m.calib_win);
+        }
+        // The line alone overshoots the late window; the factors land at least twice as close to what it needs.
+        let (line_err, err) = ((line_only.calibrated(1.0, 35.0) - 1.0).abs(), (m.calibrated(1.0, 35.0) - 1.0).abs());
+        assert!(line_err > 0.2 && err < line_err / 2.0, "at 35 min: line alone off by {line_err:.3}, with factors {err:.3}");
+        eprintln!("35 min: line alone ×{:.3}, with window factors ×{:.3} (needs ×1); windows {:?}", line_only.calibrated(1.0, 35.0), m.calibrated(1.0, 35.0), m.calib_win);
     }
 }

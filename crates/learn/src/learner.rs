@@ -216,7 +216,18 @@ struct State {
     contexts: Arc<BTreeMap<String, Vec<Situation>>>,
     /// Continuous learning: the models being trained game by game, not served until a check accepts them.
     draft: Option<Draft>,
+    /// The calibration pool (1.2.2): held-out examples of the last `CAL_POOL_MATCHES` calibration records (one record
+    /// in `CALIB_HOLDOUT`, never trained on), one entry per match. Kept across checks, rejections and resets, and
+    /// refilled from the store once per run, so the temperature line always has enough matches to be fitted. Before,
+    /// each draft gathered its own and lost them when reset: at most about 174 matches, under the 250 the fit needs,
+    /// so a draft's probabilities were never corrected and every check failed on calibration.
+    cal_pool: std::collections::VecDeque<Vec<Sample>>,
+    cal_pool_filled: bool,
 }
+
+/// Calibration records the pool keeps (the newest), and how far back before the cursor it looks when refilled.
+const CAL_POOL_MATCHES: usize = 2_000;
+const CAL_POOL_SCAN: u64 = 20_000;
 
 /// The draft of continuous learning (in memory only: after a restart, the games since the last accepted model are
 /// learnt again from the store, so nothing is lost).
@@ -229,8 +240,6 @@ struct Draft {
     /// Records learnt since the last accepted model, and since the last check.
     records: usize,
     since_check: usize,
-    /// Held-out examples (one record in `CALIB_HOLDOUT`) gathered since the last accepted model, for the calibration.
-    cal: Vec<Sample>,
     /// Checks in a row that kept the model in force.
     rejections: u32,
     last_check: Instant,
@@ -367,7 +376,7 @@ impl Learner {
             classes,
             config,
             backend,
-            state: Mutex::new(State { manifest: manifest.clone(), logistic, net, replay: vec![], replay_seen: 0, contexts, draft: None }),
+            state: Mutex::new(State { manifest: manifest.clone(), logistic, net, replay: vec![], replay_seen: 0, contexts, draft: None, cal_pool: Default::default(), cal_pool_filled: false }),
             manifest: RwLock::new(manifest),
             served: RwLock::new(None),
             stop: AtomicBool::new(false),
@@ -540,6 +549,7 @@ impl Learner {
             return Ok(rep);
         };
         self.stop.store(false, Ordering::SeqCst);
+        self.pool_fill(&mut st, src)?;
         let start = st.draft.as_ref().map(|d| d.cursor).unwrap_or(st.manifest.cursor);
         let mut records = vec![];
         let mut cursor = start;
@@ -583,7 +593,6 @@ impl Learner {
                 clock: st.manifest.clock.clone(),
                 records: 0,
                 since_check: 0,
-                cal: vec![],
                 rejections: 0,
                 last_check: Instant::now(),
             },
@@ -639,7 +648,7 @@ impl Learner {
         draft.cursor = cursor;
         draft.records += records.len();
         draft.since_check += records.len();
-        draft.cal.extend(cal);
+        Self::pool_add(&mut st, cal);
         self.remember(&mut st, &train[..fresh_n], &mut rng);
         rep.outcome = Outcome::Learned;
         rep.records = records.len();
@@ -650,6 +659,50 @@ impl Learner {
         *self.waiting.lock() = Some(self.draft_line(&st, &draft, None));
         st.draft = Some(draft);
         Ok(rep)
+    }
+
+    /// Adds calibration examples to the pool, one entry per match, dropping the oldest past `CAL_POOL_MATCHES`.
+    fn pool_add(st: &mut State, cal: Vec<Sample>) {
+        // A record's examples come together, so a new match starts wherever the match id changes.
+        let mut by_game: Vec<(u64, Vec<Sample>)> = vec![];
+        for s in cal {
+            match by_game.last_mut() {
+                Some(g) if g.0 == s.game => g.1.push(s),
+                _ => by_game.push((s.game, vec![s])),
+            }
+        }
+        for (_, v) in by_game {
+            st.cal_pool.push_back(v);
+        }
+        while st.cal_pool.len() > CAL_POOL_MATCHES {
+            st.cal_pool.pop_front();
+        }
+    }
+
+    /// Once per run: the calibration records among the last `CAL_POOL_SCAN` records already read (those after the
+    /// cursor come in through `absorb`).
+    fn pool_fill(&self, st: &mut State, src: &dyn DataSource) -> Result<()> {
+        if st.cal_pool_filled {
+            return Ok(());
+        }
+        st.cal_pool_filled = true;
+        let end = st.manifest.cursor;
+        let mut at = end.saturating_sub(CAL_POOL_SCAN);
+        let mut cal = vec![];
+        while at < end {
+            let page = src.records_after(at, 1000)?;
+            let Some(last) = page.last().map(|p| p.0) else { break };
+            for (seq, r) in page {
+                if seq <= end && fnv(&r.match_id) % CALIB_HOLDOUT == 0 {
+                    cal.extend(samples_of(&r, &self.data, &self.classes));
+                }
+            }
+            at = last;
+        }
+        let n = st.cal_pool.len();
+        Self::pool_add(st, cal);
+        self.store.log(&format!("calibration pool: {} held-out matches from the store", st.cal_pool.len() - n));
+        Ok(())
     }
 
     fn draft_line(&self, st: &State, d: &Draft, policy: Option<&CheckPolicy>) -> String {
@@ -671,6 +724,7 @@ impl Learner {
     pub fn check(&self, src: &dyn DataSource, policy: &CheckPolicy) -> Result<Option<UpdateReport>> {
         let t0 = Instant::now();
         let mut st = self.state.lock();
+        self.pool_fill(&mut st, src)?;
         let Some(mut d) = st.draft.take() else { return Ok(None) };
         let overdue = policy.max_wait.map(|w| d.last_check.elapsed() >= w).unwrap_or(false);
         if d.since_check == 0 || (d.since_check < policy.every && !overdue) {
@@ -703,8 +757,9 @@ impl Learner {
             log: vec![],
         };
         let mut cand = d.logistic.clone();
-        let cal_w: Vec<f64> = d.cal.iter().map(|s| sample_weight(s, &d.clock, &self.config.weights)).collect();
-        cand.fit_calibration(&d.cal, &cal_w, self.backend.as_ref());
+        let cal: Vec<Sample> = st.cal_pool.iter().flatten().cloned().collect();
+        let cal_w: Vec<f64> = cal.iter().map(|s| sample_weight(s, &d.clock, &self.config.weights)).collect();
+        cand.fit_calibration(&cal, &cal_w, self.backend.as_ref());
         let detail = format!("{} games learnt one by one since the model in force ({} checks kept it)", d.records, d.rejections);
         let accepted = self.judge_logistic(&mut st, src, cand.clone(), &val, d.records, &detail, &mut report)?;
         let mut accepted_any = accepted;
@@ -722,7 +777,6 @@ impl Learner {
             st.manifest.records_seen += d.records as u64;
             st.manifest.clock = d.clock.clone();
             d.records = 0;
-            d.cal.clear();
             d.rejections = 0;
             st.draft = Some(d);
         } else {
@@ -881,6 +935,7 @@ impl Learner {
         report.batches += batches;
         let cal_w: Vec<f64> = cal.iter().map(|s| sample_weight(s, &clock, &self.config.weights)).collect();
         cand.fit_calibration(&cal, &cal_w, self.backend.as_ref());
+        Self::pool_add(&mut st, cal);
         let detail = format!("{} records, {} examples (+{} replayed), {} mini-batches", n_records, fresh_n, k, batches);
         let mut accepted_any = self.judge_logistic(&mut st, src, cand, &val, n_records, &detail, &mut report)?;
 

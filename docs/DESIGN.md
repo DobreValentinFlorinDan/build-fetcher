@@ -533,3 +533,9 @@ agreement, and write each change in the hand-over section of this file.
   - **Tests:** the armor test and the team-gate test use `noise_allowance` 1.0 for their first model only. The first
     model's calibration bound is at the noise edge on small synthetic sets (1.2.2 passed the armor test's with 0.0266
     against 0.0268), and these tests are about later steps. The guardrail tests keep the strict bound.
+- (lead, 2026-11-26, 1.3.1) **The team network's progress on the Model page** (user request).
+  - `ModelStatus.team: Option<TeamProgress>`, with `serde(default)`, holds: awake, games, threshold, version in
+    force, backlog.
+  - **Filling it:** `Learner::refresh_team(src)` runs at attach (`wire_learn.rs`). It counts the stored timeline
+    games, so the numbers are there before the first game of the run. `absorb` keeps them current.
+  - **Web:** the `TeamCard` in `pages.tsx` shows a bar while dormant and the state once awake.

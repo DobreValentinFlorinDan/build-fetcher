@@ -27,7 +27,13 @@ const ENEMY_START: usize = GLOBAL + PAIR;
 const ENEMY_HALF: usize = ENEMY / 2;
 /// The enemy tags that meet the player's items one by one: armor, magic resist, healing, anti-heal, health.
 const INTERACT_TAGS: [usize; 5] = [0, 1, 2, 3, 6];
-pub const DIM: usize = GLOBAL + PAIR + ENEMY;
+/// The stat region (1.3.0), after the enemy region, starting at zero like it: one shared weight per combat number,
+/// then each champion-role's own weight per combat number (signed, like the pair part).
+pub const STAT_BITS: u32 = 16;
+pub const STAT: usize = 1 << STAT_BITS;
+const STAT_START: usize = GLOBAL + PAIR + ENEMY;
+const STAT_HALF: usize = STAT / 2;
+pub const DIM: usize = GLOBAL + PAIR + ENEMY + STAT;
 /// Global slots below this are the dense game-state inputs and the bias, never hashed into.
 const RESERVED: usize = 40;
 const KNOT_FEATURES: usize = 8;
@@ -151,6 +157,24 @@ pub fn featurize(s: &Situation, out: &mut Vec<(u32, f64)>) {
         out.push(g(&[19, b, prof]));
     }
     enemy_features(s, role, out);
+    stat_features(s, role, out);
+}
+
+/// The combat vector (1.3.0): a shared weight per number, and the champion-role's own (its taste for each stat).
+fn stat_features(s: &Situation, role: i64, out: &mut Vec<(u32, f64)>) {
+    for (k, x) in s.combat.iter().enumerate() {
+        let x = *x as f64;
+        if x == 0.0 {
+            continue;
+        }
+        let k = k as i64;
+        out.push(((STAT_START as u64 + hash(&[40, k]) % STAT_HALF as u64) as u32, x));
+        // Each champion-role's taste: for the build's stats only (the combat terms are shared).
+        if (k as usize) < bf_core::ddragon::ITEM_STATS {
+            let h = hash(&[3000, s.champion, role, 41, k]);
+            out.push(((STAT_START as u64 + STAT_HALF as u64 + (h >> 1) % STAT_HALF as u64) as u32, if h & 1 == 1 { x } else { -x }));
+        }
+    }
 }
 
 /// The enemy's build (1.2.0): each enemy item, each tag level, the champion-role's response to each tag, and each of
@@ -450,6 +474,8 @@ impl LogisticModel {
                         o.l2_global
                     } else if (ENEMY_START..ENEMY_START + ENEMY_HALF).contains(&j) {
                         o.l2_enemy
+                    } else if (STAT_START..STAT_START + STAT_HALF).contains(&j) {
+                        o.l2_pair
                     } else {
                         o.l2_pair
                     };

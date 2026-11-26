@@ -78,6 +78,10 @@ pub struct Situation {
     pub enemy_items: Vec<i64>,
     #[serde(default)]
     pub enemy_tags: [f64; ENEMY_TAGS],
+    /// The combat vector (1.3.0, `combat::combat_vector`): the build's stats and what they do against the enemy's.
+    /// Empty without a timeline, and in the stored draft contexts.
+    #[serde(default)]
+    pub combat: Vec<f32>,
 }
 
 /// What an enemy team's items add up to, one level per tag: armor, magic resist, healing (life steal, omnivamp),
@@ -272,6 +276,7 @@ fn draft_situation(r: &MatchRecord, i: usize, data: &StaticData) -> Situation {
         state: GameState::default(),
         enemy_items: vec![],
         enemy_tags: [0.0; ENEMY_TAGS],
+        combat: vec![],
     }
 }
 
@@ -334,6 +339,17 @@ pub fn samples_of(r: &MatchRecord, data: &StaticData, classes: &ItemClasses) -> 
                 .flat_map(|(j, _)| owned[j][k].0.iter().copied().chain(owned[j][k].1))
                 .collect();
             s.enemy_tags = classes.enemy_tag_levels(&s.enemy_items);
+            // The combat math: everyone's level from the frames, items from the purchase logs.
+            let level = |j: usize| r.frames.get(j).and_then(|fr| fr.get(m as usize)).map(|f| f.level as f64).unwrap_or(1.0);
+            let kit: Vec<Vec<i64>> = (0..r.players.len()).map(|j| owned[j][k].0.iter().copied().chain(owned[j][k].1).collect()).collect();
+            let enemies: Vec<crate::combat::PlayerIn> = r
+                .players
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| q.team != p.team && q.champion > 0)
+                .map(|(j, q)| crate::combat::PlayerIn { champion: q.champion, level: level(j), items: &kit[j] })
+                .collect();
+            s.combat = crate::combat::combat_vector(data, &crate::combat::PlayerIn { champion: p.champion, level: level(i), items: &kit[i] }, &enemies);
             s.state = GameState {
                 minute: m as f64,
                 gold_diff: of.map(|o| f.total_gold as f64 - o.total_gold as f64).unwrap_or(0.0),

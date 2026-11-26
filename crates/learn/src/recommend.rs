@@ -734,11 +734,16 @@ impl Recommender {
                 let (wpa, pred) = match (&served, &now) {
                     (Some(sv), Some((p0, x))) => {
                         let mut y = x.clone();
-                        if self.classes.boots.contains(&s.option.item_ids()[0]) {
-                            y.boots = Some(s.option.item_ids()[0]);
+                        let id = s.option.item_ids()[0];
+                        if self.classes.boots.contains(&id) {
+                            y.boots = Some(id);
                         } else {
-                            y.items.push(s.option.item_ids()[0]);
+                            y.items.push(id);
                         }
+                        // The combat math with the candidate bought (its components leave the inventory).
+                        let mut mine: Vec<i64> = ctx.my_items.iter().copied().filter(|i| !self.recipe_contains(id, *i)).collect();
+                        mine.push(id);
+                        y.combat = self.live_combat(ctx, &mine);
                         let p = sv.predict(&y);
                         (p - p0, Some(p))
                     }
@@ -859,6 +864,7 @@ impl Recommender {
         s.boots = ctx.my_items.iter().copied().find(|i| self.classes.boots.contains(i));
         s.enemy_items = ctx.enemy_items.iter().flat_map(|(_, v)| v.iter().copied()).filter(|i| self.classes.is_build_item(*i)).collect();
         s.enemy_tags = self.classes.enemy_tag_levels(&s.enemy_items);
+        s.combat = self.live_combat(ctx, &ctx.my_items);
         let diff = |a: u8, b: u8| a as f64 - b as f64;
         s.state = crate::features::GameState {
             minute: ctx.game_time_s / 60.0,
@@ -871,6 +877,28 @@ impl Recommender {
             baron_diff: diff(ctx.barons.0, ctx.barons.1),
         };
         s
+    }
+
+    /// The combat vector in game: the user's items against the enemies' champions, levels and items. Without the
+    /// players list (older callers), the enemies' items at the user's level.
+    fn live_combat(&self, ctx: &LiveContext, my_items: &[i64]) -> Vec<f32> {
+        use crate::combat::{combat_vector, PlayerIn};
+        let keep = |v: &[i64]| -> Vec<i64> { v.iter().copied().filter(|i| self.classes.is_build_item(*i)).collect() };
+        let mine = keep(my_items);
+        let enemies: Vec<(i64, f64, Vec<i64>)> = if ctx.players.is_empty() {
+            ctx.enemy_items.iter().map(|(c, v)| (*c, ctx.my_level as f64, keep(v))).collect()
+        } else {
+            ctx.players.iter().filter(|p| !p.ally).map(|p| (p.champion, p.level as f64, keep(&p.items))).collect()
+        };
+        let enemies: Vec<PlayerIn> = enemies.iter().map(|(c, l, v)| PlayerIn { champion: *c, level: *l, items: v }).collect();
+        combat_vector(&self.data, &PlayerIn { champion: ctx.draft.champion, level: (ctx.my_level as f64).max(1.0), items: &mine }, &enemies)
+    }
+
+    /// `part` is somewhere in `id`'s recipe.
+    fn recipe_contains(&self, id: i64, part: i64) -> bool {
+        let mut parts = vec![];
+        recipe_parts(&self.data, id, &mut parts, 0);
+        parts.contains(&part)
     }
 
     fn suits(&self, id: i64, magic: bool) -> bool {

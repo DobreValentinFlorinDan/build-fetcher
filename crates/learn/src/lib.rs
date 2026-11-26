@@ -25,6 +25,7 @@
 
 pub mod backend;
 pub mod checkpoint;
+pub mod combat;
 pub mod features;
 pub mod learner;
 pub mod logistic;

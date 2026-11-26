@@ -1157,7 +1157,9 @@ impl Learner {
             }
             let Some(role) = x.role else { continue };
             let v = ctx.entry(context_key(x.champion, role)).or_default();
-            v.push(x.clone());
+            // Without the combat vector: a context stands for its champion-role in champ select, where the build is
+            // what's being chosen (and the vector would weigh hundreds of bytes per context on disk).
+            v.push(Situation { combat: vec![], ..x.clone() });
             if v.len() > self.config.contexts_per_pair {
                 let extra = v.len() - self.config.contexts_per_pair;
                 v.drain(..extra);

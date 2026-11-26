@@ -542,6 +542,21 @@ pub struct LiveContext {
     pub towers: (u8, u8),
     pub dragons: (u8, u8),
     pub barons: (u8, u8),
+    /// Every player but the user (1.3.0): champion, side, level and items, as the scoreboard shows them. The
+    /// combat math and the team network read it.
+    #[serde(default)]
+    pub players: Vec<LivePlayer>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LivePlayer {
+    pub champion: i64,
+    pub role: Option<Role>,
+    /// On the user's team.
+    pub ally: bool,
+    pub level: u8,
+    pub items: Vec<i64>,
 }
 
 /// Where a number came from when the matchup's own data were thin.

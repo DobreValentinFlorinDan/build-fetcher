@@ -26,6 +26,8 @@ pub struct AppSettings {
     pub learning: bool,
     /// Fetching on, or paused by the user (Fetching → Pause / Resume). Kept across restarts.
     pub fetching: bool,
+    /// Share of games outside tier A fetched with their timeline (0-1; Settings → Regions and rank, 1.2.0).
+    pub timeline_sample: f64,
     /// The first-run steps (key, region) were completed: fetching may start.
     pub first_run_complete: bool,
 }
@@ -41,6 +43,7 @@ impl Default for AppSettings {
             gpu: false,
             learning: true,
             fetching: true,
+            timeline_sample: bf_store::settings::DEFAULT_TIMELINE_SAMPLE,
             first_run_complete: false,
         }
     }
@@ -65,6 +68,8 @@ pub struct SettingsPatch {
     pub learning: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetching: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_sample: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_run_complete: Option<bool>,
 }
@@ -91,6 +96,9 @@ impl SettingsPatch {
         }
         if let Some(v) = self.fetching {
             s.fetching = v;
+        }
+        if let Some(v) = self.timeline_sample {
+            s.timeline_sample = v;
         }
         if let Some(v) = self.first_run_complete {
             s.first_run_complete = v;

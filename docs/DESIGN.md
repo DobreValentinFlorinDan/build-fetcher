@@ -474,3 +474,15 @@ agreement, and write each change in the hand-over section of this file.
   - **Settings:** `timelineSample` default 0.25 (0.1 before) for new settings files; a choice of 10/25/50/100% in
     Settings → Regions and rank.
   - Measurements: MEASUREMENTS.md, "1.2.0".
+- (lead, 2026-11-26, 1.2.1) **The timeline share reaches the settings API.**
+  - **User report:** choosing a share showed "Settings: unknown field `timelineSample`".
+  - **Cause:** 1.2.0 added the setting to `bf_store::settings`, the fetcher and the page, but not to the server's
+    `AppSettings` view and `SettingsPatch` (`deny_unknown_fields`) in `handles.rs`.
+  - **Now:**
+    - both carry `timeline_sample`;
+    - `routes::validate_patch` accepts 0–1;
+    - `RealStore` saves it and logs the change.
+  - **Tests:** `settings_round_trip_and_validation` (stand-in store) and `real_key_handles_import_from_irelia_without_touching_it`
+    (real store to file).
+  - **Lesson:** 1.2.0's UI change was not clicked in a browser before release. This one was, on the real server (see
+    the release notes).

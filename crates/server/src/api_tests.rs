@@ -173,6 +173,8 @@ async fn settings_round_trip_and_validation() {
         json!({ "rankFloor": "mine" }),
         json!({ "diskBudgetBytes": 1000 }),
         json!({ "tierA": [99999] }),
+        json!({ "timelineSample": 2 }),
+        json!({ "timelineSample": -0.1 }),
         json!({ "somethingElse": true }),
     ] {
         let (st, b) = call(&t.app, Method::PATCH, "/api/settings", Some(bad.clone())).await;
@@ -184,6 +186,12 @@ async fn settings_round_trip_and_validation() {
     let (st, b) = call(&t.app, Method::PATCH, "/api/settings", Some(json!({ "firstRunComplete": true }))).await;
     assert_eq!(st, StatusCode::OK, "{b}");
     assert!(get(&t.app, "/api/status").await["firstRunComplete"].as_bool().unwrap());
+
+    // 1.2.0's timeline share (Settings → Regions and rank): shown, and changed by a patch (the dashboard sends it).
+    assert_eq!(get(&t.app, "/api/settings").await["settings"]["timelineSample"], 0.25);
+    let (st, b) = call(&t.app, Method::PATCH, "/api/settings", Some(json!({ "timelineSample": 0.5 }))).await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(get(&t.app, "/api/settings").await["settings"]["timelineSample"], 0.5);
 }
 
 #[tokio::test]

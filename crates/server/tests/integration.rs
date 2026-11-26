@@ -132,6 +132,13 @@ async fn real_key_handles_import_from_irelia_without_touching_it() {
     let shown = serde_json::to_string(&(store.fetch_status(), store.settings(), keys.key_masked(), keys.irelia_offer())).unwrap();
     assert!(!shown.contains("00000000-irelia"), "{shown}");
 
+    // The timeline share goes through the real store to the settings file and back (1.2.1: it was missing here).
+    assert_eq!(store.settings().timeline_sample, bf_store::settings::DEFAULT_TIMELINE_SAMPLE);
+    let after = store.update_settings(&bf_server::handles::SettingsPatch { timeline_sample: Some(0.5), ..Default::default() }).unwrap();
+    assert_eq!(after.timeline_sample, 0.5);
+    assert_eq!(store.settings().timeline_sample, 0.5);
+    assert_eq!(bf_store::settings::load(&settings_file).0.timeline_sample, 0.5);
+
     // A pasted key replaces it; Irelia's file still untouched.
     keys.set_key("RGAPI-00000000-0000-0000-0000-00000000test").unwrap();
     assert_eq!(keys.key_masked(), "RGAPI-…test");

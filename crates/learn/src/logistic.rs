@@ -537,7 +537,7 @@ mod tests {
                 let won = r.uniform() < p;
                 for (team, w, zz) in [(0u64, won, zi), (1, !won, -zi)] {
                     let situation = Situation { state: GameState { minute, ..Default::default() }, ..Default::default() };
-                    out.push(Sample { situation, won: w, is_me: false, version: None, rank: None, group: g as u64 * 2 + team, game: g as u64 });
+                    out.push(Sample { situation, won: w, is_me: false, version: None, rank: None, group: g as u64 * 2 + team, game: g as u64, player: 0 });
                     z.push(zz);
                 }
             }

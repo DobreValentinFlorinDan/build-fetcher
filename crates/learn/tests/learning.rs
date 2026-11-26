@@ -730,3 +730,51 @@ fn continuous_learning_never_serves_a_worse_draft_and_resets_it() {
     let l = Learner::open(dir.path(), data(), quick()).unwrap();
     assert_eq!(l.absorb(&src, 1000, None, idle()).unwrap().outcome, Outcome::NoData, "the cursor was saved");
 }
+
+// ------------------------------------------------------------------------------------------------ the team network
+
+/// 1.3.0: step 3 sleeps until enough games with a timeline exist (here a threshold of 4,400), says so in the status,
+/// then wakes up on its own, learns the new games and the stored backlog, and each check judges it. It stays awake
+/// after a restart.
+#[test]
+fn team_network_sleeps_until_its_threshold_then_wakes_and_is_judged() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = source(4000, 41);
+    // (The first model's calibration check sits at the noise edge on these small sets; this test is about step 3.)
+    let mut config = LearnConfig { guardrail: bf_learn::metrics::Guardrail { noise_allowance: 1.0, ..Default::default() }, ..quick() };
+    config.team.threshold = 4400;
+    let l = Learner::open(dir.path(), data(), config.clone()).unwrap();
+    let r0 = l.train_step(&src, &Budget::records(4000)).unwrap();
+    assert_eq!(r0.outcome, Outcome::Accepted, "{:#?}", r0.log);
+    let policy = CheckPolicy { every: 150, max_wait: None, ..Default::default() };
+
+    more(&mut src, 200, 42, false);
+    assert_eq!(l.absorb(&src, 1000, None, idle()).unwrap().outcome, Outcome::Learned);
+    let line = l.status().log.iter().find(|x| x.starts_with("Team network")).cloned().unwrap_or_default();
+    assert!(line.starts_with("Team network: dormant,") && line.contains("of 4400 games with a timeline"), "{:?}", l.status().log);
+    let r = l.check(&src, &policy).unwrap().expect("a check is due");
+    assert!(r.steps.iter().all(|s| s.kind != "team-nn"), "asleep: not judged");
+
+    // 900 more: past the threshold, it wakes up and learns.
+    more(&mut src, 900, 43, false);
+    assert_eq!(l.absorb(&src, 1000, None, idle()).unwrap().outcome, Outcome::Learned);
+    let line = l.status().log.iter().find(|x| x.starts_with("Team network")).cloned().unwrap_or_default();
+    assert!(line.starts_with("Team network: awake"), "{line}");
+    let r = l.check(&src, &policy).unwrap().expect("a check is due");
+    let team: Vec<&StepReport> = r.steps.iter().filter(|s| s.kind == "team-nn").collect();
+    assert_eq!(team.len(), 1, "{:#?}", r.log);
+    assert!(r.log.iter().any(|x| x.contains("team network")), "{:#?}", r.log);
+    for x in r.log.iter().filter(|x| x.contains("team network") || x.contains("step took")) {
+        eprintln!("{x}");
+    }
+    if team[0].accepted {
+        assert!(l.served().unwrap().team.is_some());
+    }
+    drop(l);
+    // Awake after a restart too.
+    let l = Learner::open(dir.path(), data(), config).unwrap();
+    more(&mut src, 20, 44, false);
+    l.absorb(&src, 1000, None, idle()).unwrap();
+    let line = l.status().log.iter().find(|x| x.starts_with("Team network")).cloned().unwrap_or_default();
+    assert!(line.starts_with("Team network: awake"), "{line}");
+}

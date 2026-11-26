@@ -506,6 +506,10 @@ pub trait DataSource: Send + Sync {
     fn validation_records(&self) -> anyhow::Result<Vec<MatchRecord>>;
     /// The newest patch with data.
     fn current_patch(&self) -> anyhow::Result<Option<Patch>>;
+    /// Stored records with a timeline (1.3.0: the team network's wake-up threshold counts them).
+    fn timeline_count(&self) -> anyhow::Result<u64> {
+        Ok(0)
+    }
 }
 
 // ------------------------------------------------------------------------------------------------ recommendations

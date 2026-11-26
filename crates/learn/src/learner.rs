@@ -7,12 +7,14 @@
 //! per model to the learning log.
 
 use crate::backend::{select_backend, Backend};
-use crate::checkpoint::{self, Entry, Manifest, Store, LOGISTIC, SHARED_NN};
-use crate::features::{sample_weight, samples_of, sigmoid, ItemClasses, PatchClock, Rng, Sample, Situation, WeightOptions};
+use crate::checkpoint::{self, Entry, Manifest, Store, LOGISTIC, SHARED_NN, TEAM_NN};
+use crate::teamnet::{TeamNet, TeamOptions, TeamSample};
+use crate::features::{sample_weight, samples_of, sigmoid, team_sample, ItemClasses, PatchClock, Rng, Sample, Situation, WeightOptions};
 use crate::logistic::{LogisticModel, TrainOptions};
 use crate::metrics::{evaluation, fmt_metrics, Evaluation, Guardrail};
 use crate::nn::{NetOptions, SharedNet};
 use anyhow::{anyhow, Result};
+use rayon::prelude::*;
 use bf_core::build::{Activity, DataSource, MatchRecord, Metrics, ModelStatus, Role};
 use bf_core::ddragon::StaticData;
 use parking_lot::{Mutex, RwLock};
@@ -44,6 +46,9 @@ pub struct LearnConfig {
     /// Continuous learning (`absorb`).
     #[serde(default)]
     pub continuous: ContinuousOptions,
+    /// Model step 3, the team network: dormant until its threshold (1.3.0).
+    #[serde(default)]
+    pub team: TeamOptions,
 }
 
 /// How `absorb` learns: in passes over at least `min_games` new games, with a smaller step than a batch update.
@@ -81,6 +86,7 @@ impl Default for LearnConfig {
             use_gpu: false,
             verify_every: 50,
             continuous: ContinuousOptions::default(),
+            team: TeamOptions::default(),
         }
     }
 }
@@ -178,6 +184,9 @@ pub struct Served {
     pub net: Option<Arc<SharedNet>>,
     pub net_version: Option<String>,
     pub contexts: Arc<BTreeMap<String, Vec<Situation>>>,
+    /// Step 3, once it has woken up and passed a check (1.3.0).
+    pub team: Option<Arc<TeamNet>>,
+    pub team_version: Option<String>,
 }
 
 impl Served {
@@ -187,12 +196,24 @@ impl Served {
     pub fn predict(&self, s: &Situation) -> f64 {
         sigmoid(self.logit(s))
     }
-    /// "v12" (step 1) or "v12+v13" (step 2 on top of step 1).
+    /// With the team network's residual when it is in force and the whole team is known (in game).
+    pub fn predict_team(&self, s: &Situation, team: Option<&TeamSample>) -> f64 {
+        let r = match (&self.team, team) {
+            (Some(n), Some(t)) => n.residual(t),
+            _ => 0.0,
+        };
+        sigmoid(self.logit(s) + r)
+    }
+    /// "v12" (step 1), "v12+v13" (step 2 on top of step 1), "+v14" more with step 3.
     pub fn version(&self) -> String {
-        match &self.net_version {
+        let mut v = match &self.net_version {
             Some(n) => format!("{}+{}", self.logistic_version, n),
             None => self.logistic_version.clone(),
+        };
+        if let Some(t) = &self.team_version {
+            v = format!("{v}+{t}");
         }
+        v
     }
     /// Training examples the model has seen for a champion-role.
     pub fn pair_samples(&self, champion: i64, role: Role) -> u64 {
@@ -223,6 +244,13 @@ struct State {
     /// so a draft's probabilities were never corrected and every check failed on calibration.
     cal_pool: std::collections::VecDeque<Vec<Sample>>,
     cal_pool_filled: bool,
+    /// Step 3 (1.3.0): in force, its draft (once awake), its replay examples, and the stored games with a timeline
+    /// when this run started (counted once, for the threshold).
+    team: Option<(String, Arc<TeamNet>)>,
+    team_draft: Option<TeamNet>,
+    team_replay: Vec<(Sample, TeamSample)>,
+    team_seen: u64,
+    stored_timelines: Option<u64>,
 }
 
 /// Calibration records the pool keeps (the newest), and how far back before the cursor it looks when refilled.
@@ -243,6 +271,9 @@ struct Draft {
     /// Checks in a row that kept the model in force.
     rejections: u32,
     last_check: Instant,
+    /// Records with a timeline learnt since the last accepted model (they count towards step 3's threshold once
+    /// the cursor moves past them).
+    timeline: u64,
 }
 
 /// How often continuous learning is checked, and when a draft that keeps failing is dropped.
@@ -295,6 +326,8 @@ pub struct Learner {
     last_update: Mutex<Instant>,
     /// What the learner is waiting for, shown first in the status log.
     waiting: Mutex<Option<String>>,
+    /// Step 3's state for the status (dormant with its progress, or awake).
+    team_status: Mutex<Option<String>>,
 }
 
 /// The process's peak resident memory (VmHWM), where the system says it.
@@ -368,6 +401,14 @@ impl Learner {
             }
             None => None,
         };
+        let team = match &manifest.active_team {
+            Some(v) => {
+                let e = manifest.entry(v).ok_or_else(|| anyhow!("active checkpoint {v} missing from the manifest"))?;
+                Some((v.clone(), Arc::new(store.load_team(e)?)))
+            }
+            None => None,
+        };
+        let team_draft = if manifest.team_awake { Some(team.as_ref().map(|t| (*t.1).clone()).unwrap_or_else(|| TeamNet::new(config.team.net.seed ^ config.seed))) } else { None };
         let contexts = Arc::new(store.load_contexts());
         let classes = ItemClasses::new(&data);
         let l = Learner {
@@ -376,13 +417,23 @@ impl Learner {
             classes,
             config,
             backend,
-            state: Mutex::new(State { manifest: manifest.clone(), logistic, net, replay: vec![], replay_seen: 0, contexts, draft: None, cal_pool: Default::default(), cal_pool_filled: false }),
+            state: Mutex::new(State { manifest: manifest.clone(), logistic, net, replay: vec![], replay_seen: 0, contexts,
+                draft: None,
+                cal_pool: Default::default(),
+                cal_pool_filled: false,
+                team,
+                team_draft,
+                team_replay: vec![],
+                team_seen: 0,
+                stored_timelines: None,
+            }),
             manifest: RwLock::new(manifest),
             served: RwLock::new(None),
             stop: AtomicBool::new(false),
             learning: AtomicBool::new(true),
             last_update: Mutex::new(Instant::now()),
             waiting: Mutex::new(None),
+            team_status: Mutex::new(None),
         };
         l.publish(&l.state.lock());
         Ok(l)
@@ -420,7 +471,7 @@ impl Learner {
             learning: self.learning.load(Ordering::SeqCst),
             backend: self.backend.name(),
             checkpoints: self.manifest.read().infos(),
-            log: self.waiting.lock().iter().cloned().chain(self.store.log_tail(50)).collect(),
+            log: self.waiting.lock().iter().cloned().chain(self.team_line()).chain(self.store.log_tail(50)).collect(),
         }
     }
 
@@ -432,6 +483,8 @@ impl Learner {
                 net: st.net.as_ref().map(|(_, n)| n.clone()),
                 net_version: st.net.as_ref().map(|(v, _)| v.clone()),
                 contexts: st.contexts.clone(),
+                team: st.team.as_ref().map(|(_, n)| n.clone()),
+                team_version: st.team.as_ref().map(|(v, _)| v.clone()),
             })
         });
         *self.served.write() = served;
@@ -446,7 +499,13 @@ impl Learner {
         // A draft learnt on top of the model being replaced is dropped; its games are learnt again on top of this one.
         st.draft = None;
         *self.waiting.lock() = None;
-        if e.kind == LOGISTIC {
+        if e.kind == TEAM_NN {
+            st.team = Some((e.version.clone(), Arc::new(self.store.load_team(&e)?)));
+            st.manifest.active_team = Some(e.version.clone());
+        } else if e.kind == LOGISTIC {
+            // Step 3 was judged on top of the step 1 in force: it goes with it.
+            st.team = None;
+            st.manifest.active_team = None;
             st.logistic = Some((e.version.clone(), Arc::new(self.store.load_logistic(&e)?)));
             st.manifest.active_logistic = Some(e.version.clone());
             let nn = st.manifest.checkpoints.iter().rev().find(|c| c.kind == SHARED_NN && c.parent.as_deref() == Some(version)).cloned();
@@ -550,6 +609,9 @@ impl Learner {
         };
         self.stop.store(false, Ordering::SeqCst);
         self.pool_fill(&mut st, src)?;
+        if st.stored_timelines.is_none() {
+            st.stored_timelines = Some(src.timeline_count()?);
+        }
         let start = st.draft.as_ref().map(|d| d.cursor).unwrap_or(st.manifest.cursor);
         let mut records = vec![];
         let mut cursor = start;
@@ -595,6 +657,7 @@ impl Learner {
                 since_check: 0,
                 rejections: 0,
                 last_check: Instant::now(),
+                timeline: 0,
             },
         };
         for r in &records {
@@ -606,8 +669,10 @@ impl Learner {
             draft.clock.observe_patch(p);
         }
         let (cal_records, train_records): (Vec<&MatchRecord>, Vec<&MatchRecord>) = records.iter().partition(|r| fnv(&r.match_id) % CALIB_HOLDOUT == 0);
-        let fresh: Vec<Sample> = train_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        let per_record: Vec<Vec<Sample>> = train_records.iter().map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        let fresh: Vec<Sample> = per_record.iter().flatten().cloned().collect();
         let cal: Vec<Sample> = cal_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
+        let n_timeline = records.iter().filter(|r| r.has_timeline()).count() as u64;
         let mut rng = Rng(self.config.seed ^ cursor.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         let fresh_n = fresh.len();
         let mut train = fresh;
@@ -645,6 +710,72 @@ impl Learner {
         }
         draft.logistic = lm;
         draft.net = net;
+        draft.timeline += n_timeline;
+        // Step 3: wake it up once there are enough games with a timeline, then let it learn these games and a slice of
+        // the stored backlog.
+        let progress = (st.manifest.timeline_seen + draft.timeline).max(st.stored_timelines.unwrap_or(0));
+        if !st.manifest.team_awake && progress >= self.config.team.threshold {
+            st.manifest.team_awake = true;
+            st.team_draft = Some(TeamNet::new(self.config.team.net.seed ^ self.config.seed));
+            self.store.log(&format!("team network woke up: {progress} games with a timeline (threshold {})", self.config.team.threshold));
+        }
+        if st.manifest.team_awake {
+            let mut pairs: Vec<(Sample, TeamSample)> = vec![];
+            for (r, v) in train_records.iter().zip(&per_record) {
+                pairs.extend(v.iter().filter_map(|s| team_sample(r, s, &self.data, &self.classes).map(|t| (s.clone(), t))));
+            }
+            let fresh_pairs = pairs.len();
+            // The backlog: games already read by steps 1 and 2 (never the calibration ones), oldest first.
+            let end = st.manifest.cursor;
+            if st.manifest.team_cursor < end {
+                let page = src.records_after(st.manifest.team_cursor, self.config.team.backlog_per_call)?;
+                for (seq, r) in &page {
+                    if *seq > end {
+                        break;
+                    }
+                    st.manifest.team_cursor = *seq;
+                    if fnv(&r.match_id) % CALIB_HOLDOUT == 0 || !r.has_timeline() {
+                        continue;
+                    }
+                    pairs.extend(samples_of(r, &self.data, &self.classes).into_iter().filter_map(|s| team_sample(r, &s, &self.data, &self.classes).map(|t| (s, t))));
+                }
+            }
+            let new_pairs = pairs.len();
+            let k = new_pairs.min(st.team_replay.len());
+            let mut pick: Vec<usize> = (0..st.team_replay.len()).collect();
+            rng.shuffle(&mut pick);
+            pairs.extend(pick[..k].iter().map(|i| st.team_replay[*i].clone()));
+            if !pairs.is_empty() {
+                let sits: Vec<Sample> = pairs.iter().map(|p| p.0.clone()).collect();
+                let mut base = self.logits_of(&draft.logistic, &sits);
+                if let Some(n) = &draft.net {
+                    for (b, r) in base.iter_mut().zip(Self::residuals_of(n, &sits)) {
+                        *b += r;
+                    }
+                }
+                let labels: Vec<f64> = sits.iter().map(|s| s.label()).collect();
+                let w: Vec<f64> = sits.iter().map(|s| sample_weight(s, &draft.clock, &self.config.weights)).collect();
+                let teams: Vec<TeamSample> = pairs.iter().map(|p| p.1.clone()).collect();
+                let mut ord: Vec<usize> = (0..teams.len()).collect();
+                rng.shuffle(&mut ord);
+                let mut tn = st.team_draft.clone().unwrap_or_else(|| TeamNet::new(self.config.team.net.seed ^ self.config.seed));
+                if tn.train(&teams, &labels, &base, &w, &ord, &self.config.team.net, &stop).is_ok() {
+                    st.team_draft = Some(tn);
+                    st.team_seen += (fresh_pairs > 0) as u64;
+                }
+                // Reservoir of the new examples for replay.
+                let cap = self.config.team.replay;
+                for p in pairs.into_iter().take(new_pairs) {
+                    if st.team_replay.len() < cap {
+                        st.team_replay.push(p);
+                    } else if cap > 0 {
+                        let j = (rng.next_u64() % cap as u64) as usize;
+                        st.team_replay[j] = p;
+                    }
+                }
+            }
+        }
+        *self.team_status.lock() = Some(self.team_text(&st, progress));
         draft.cursor = cursor;
         draft.records += records.len();
         draft.since_check += records.len();
@@ -705,6 +836,99 @@ impl Learner {
         Ok(())
     }
 
+    fn team_text(&self, st: &State, progress: u64) -> String {
+        let th = self.config.team.threshold;
+        if !st.manifest.team_awake {
+            format!(
+                "Team network: dormant, {} of {} games with a timeline ({:.0}%). It wakes up on its own at {}.",
+                progress,
+                th,
+                100.0 * progress as f64 / th.max(1) as f64,
+                th
+            )
+        } else {
+            let backlog = st.manifest.cursor.saturating_sub(st.manifest.team_cursor);
+            let force = st.team.as_ref().map(|(v, _)| format!("{v} in force")).unwrap_or_else(|| "none in force yet".into());
+            format!("Team network: awake, learning ({force}); stored games still to go through: about {backlog}.")
+        }
+    }
+
+    /// Step 3's line for the status (None before the first continuous-learning call of this run).
+    fn team_line(&self) -> Option<String> {
+        self.team_status.lock().clone()
+    }
+
+    /// The guardrail on a step 3 candidate, on top of steps 1 + 2 in force: it must beat them without it, and the
+    /// team network in force if there is one. `val` is `val_records`' examples in order.
+    fn judge_team(&self, st: &mut State, net: TeamNet, val: &[Sample], val_records: &[MatchRecord], n_records: usize, report: &mut UpdateReport) -> Result<bool> {
+        let Some((lv, lm)) = st.logistic.clone() else { return Ok(false) };
+        let te = Instant::now();
+        let mut z = self.logits_of(&lm, val);
+        if let Some((_, n)) = &st.net {
+            for (a, r) in z.iter_mut().zip(Self::residuals_of(n, val)) {
+                *a += r;
+            }
+        }
+        let old = st.team.clone();
+        // Residuals record by record (a team example is ten players: building them all at once would take hundreds of
+        // megabytes for a full held-out sample).
+        let pairs: Vec<Vec<(f64, f64)>> = val_records
+            .par_iter()
+            .map(|r| {
+                samples_of(r, &self.data, &self.classes)
+                    .iter()
+                    .map(|s| match team_sample(r, s, &self.data, &self.classes) {
+                        Some(t) => (net.residual(&t), old.as_ref().map(|o| o.1.residual(&t)).unwrap_or(0.0)),
+                        None => (0.0, 0.0),
+                    })
+                    .collect()
+            })
+            .collect();
+        let pairs: Vec<(f64, f64)> = pairs.into_iter().flatten().collect();
+        if pairs.len() != val.len() {
+            return Err(anyhow!("team network: {} held-out examples against {}", pairs.len(), val.len()));
+        }
+        let m_base = evaluate_full(&z.iter().map(|a| sigmoid(*a)).collect::<Vec<_>>(), val);
+        let m_old = old.as_ref().map(|_| evaluate_full(&z.iter().zip(&pairs).map(|(a, p)| sigmoid(a + p.1)).collect::<Vec<_>>(), val));
+        let m_new = evaluate_full(&z.iter().zip(&pairs).map(|(a, p)| sigmoid(a + p.0)).collect::<Vec<_>>(), val);
+        report.eval_ms += te.elapsed().as_secs_f64() * 1e3;
+        let mut why = self.config.guardrail.worse(&m_base.metrics, &m_new).map(|w| format!("vs steps 1 + 2: {w}"));
+        if why.is_none() {
+            if let (Some((ov, _)), Some(mo)) = (&old, &m_old) {
+                why = self.config.guardrail.worse(&mo.metrics, &m_new).map(|w| format!("vs {ov}: {w}"));
+            }
+        }
+        let reference = m_old.as_ref().map(|m| m.metrics.clone()).unwrap_or(m_base.metrics.clone());
+        let mut step = StepReport { kind: TEAM_NN.into(), accepted: why.is_none(), version: None, before: reference.clone(), after: m_new.metrics.clone(), reason: why.clone() };
+        let accepted = match why {
+            None => {
+                let v = Self::next_version(st);
+                let (file, bytes) = self.store.write_model(&v, TEAM_NN, &checkpoint::encode_team(&net))?;
+                st.manifest.checkpoints.push(Entry {
+                    version: v.clone(),
+                    kind: TEAM_NN.into(),
+                    created_ms: bf_core::util::now_ms(),
+                    metrics: m_new.metrics.clone(),
+                    records_seen: st.manifest.records_seen + n_records as u64,
+                    file,
+                    bytes,
+                    parent: Some(lv.clone()),
+                });
+                st.manifest.active_team = Some(v.clone());
+                report.log.push(format!("{v} team network accepted on top of {}: {} -> {}", lv, fmt_metrics(&reference), fmt_metrics(&m_new.metrics)));
+                step.version = Some(v.clone());
+                st.team = Some((v, Arc::new(net)));
+                true
+            }
+            Some(w) => {
+                report.log.push(format!("team network update rejected: {w}"));
+                false
+            }
+        };
+        report.steps.push(step);
+        Ok(accepted)
+    }
+
     fn draft_line(&self, st: &State, d: &Draft, policy: Option<&CheckPolicy>) -> String {
         let every = policy.map(|p| p.every).unwrap_or(CheckPolicy::default().every);
         let v = st.logistic.as_ref().map(|(v, _)| v.as_str()).unwrap_or("the baseline");
@@ -738,7 +962,6 @@ impl Learner {
             return Ok(None);
         }
         let val: Vec<Sample> = val_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
-        drop(val_records);
         let mut report = UpdateReport {
             outcome: Outcome::Rejected,
             steps: vec![],
@@ -770,13 +993,21 @@ impl Learner {
                 accepted_any |= self.judge_net(&mut st, n, &val, d.records, &mut report)?;
             }
         }
+        if st.manifest.team_awake {
+            if let Some(tn) = st.team_draft.clone().filter(|t| t.t > 0) {
+                accepted_any |= self.judge_team(&mut st, tn, &val, &val_records, d.records, &mut report)?;
+            }
+        }
+        drop(val_records);
         d.since_check = 0;
         d.last_check = Instant::now();
         if accepted {
             st.manifest.cursor = d.cursor;
             st.manifest.records_seen += d.records as u64;
+            st.manifest.timeline_seen += d.timeline;
             st.manifest.clock = d.clock.clone();
             d.records = 0;
+            d.timeline = 0;
             d.rejections = 0;
             st.draft = Some(d);
         } else {
@@ -788,6 +1019,7 @@ impl Learner {
                 ));
                 st.manifest.cursor = d.cursor;
                 st.manifest.records_seen += d.records as u64;
+                st.manifest.timeline_seen += d.timeline;
                 st.manifest.clock = d.clock.clone();
             } else {
                 st.draft = Some(d);
@@ -897,6 +1129,7 @@ impl Learner {
         let fresh: Vec<Sample> = train_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
         let cal: Vec<Sample> = cal_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
         let n_records = records.len();
+        let n_timeline_read = records.iter().filter(|r| r.has_timeline()).count() as u64;
         drop(records);
         let val: Vec<Sample> = val_records.iter().flat_map(|r| samples_of(r, &self.data, &self.classes)).collect();
         drop(val_records);
@@ -965,6 +1198,7 @@ impl Learner {
         // The records count as read whatever the guardrails decided: they go into the replay sample and the contexts.
         st.manifest.cursor = cursor;
         st.manifest.records_seen += n_records as u64;
+        st.manifest.timeline_seen += n_timeline_read;
         st.manifest.clock = clock;
         self.remember(&mut st, &train[..fresh_n], &mut rng);
         self.store.prune(&mut st.manifest);

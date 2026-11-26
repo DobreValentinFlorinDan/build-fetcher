@@ -415,3 +415,30 @@ The 1.0 store figures were 1.35 requests per new game with 10% timelines (1.58 w
 - **The first model's calibration check stays fragile on synthetic data.** With 2,000 games, some seeds fail it on
   one window with or without the enemy features (seed 5: the 0-10 min window 0.033 against 0.026 allowed). This
   was so before 1.2.0. The app retries with the next 2,000 games.
+
+## 1.3.0: stats, combat math, team network
+
+Linux, synthetic data, release build.
+
+```
+cargo run --release -p bf-learn --example measure_continuous -- 4000 1500 1 150 1
+```
+
+| | 1.2.0 | 1.3.0 |
+|---|---|---|
+| First model (4,000 games) | 10.1 s | 10.8 s |
+| Learning one game | 5.6 ms | 6.1 ms |
+| A check (1,500 held-out matches) | 0.48 s | 0.79 s |
+| Checks accepted on the first 1,500 new games | — | 6 of 10 (log loss 0.4965 → 0.4921) |
+| Logistic model in memory | 15.0 MiB | 16.5 MiB |
+| Largest model file | 1.2 MB | 1.2 MB |
+
+- **Team network:** 68,745 weights (1.6 MiB with its optimiser state).
+  - **First check**, after waking on a 5,000-game set: rejected, log loss 0.50725 against 0.50718 for steps 1 + 2.
+  - **Time:** the check took 567 ms, 312 ms of it evaluation.
+- **Stat features where nothing was planted on stats:** the first model's calibration in the 20-30 min window moved
+  from 0.0266 (1.2.2) to 0.0278 (1.3.0) on the armor test's set; log loss 0.51840 to 0.51877.
+- **Not measured:**
+  - a planted stat effect (for example "attack speed pays off on champion X") learnt through the new features;
+  - the team network on a large set;
+  - its CPU use once awake on real data.

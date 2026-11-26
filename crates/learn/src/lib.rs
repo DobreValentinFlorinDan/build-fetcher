@@ -33,6 +33,7 @@ pub mod metrics;
 pub mod nn;
 pub mod recommend;
 pub mod synthetic;
+pub mod teamnet;
 
 pub use learner::{AbsorbReport, Budget, CheckPolicy, ContinuousOptions, LearnConfig, Learner, Outcome, Served, StepReport, UpdateReport};
 pub use recommend::{RecommendConfig, Recommender};

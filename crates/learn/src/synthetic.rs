@@ -541,6 +541,9 @@ impl DataSource for SyntheticSource {
     fn volumes(&self, patches: &[Patch]) -> anyhow::Result<Vec<PairVolume>> {
         Ok(self.volumes.iter().filter(|v| patches.is_empty() || patches.contains(&v.patch)).cloned().collect())
     }
+    fn timeline_count(&self) -> anyhow::Result<u64> {
+        Ok(self.records.iter().filter(|r| r.1.has_timeline()).count() as u64)
+    }
     fn records_after(&self, after_seq: u64, limit: usize) -> anyhow::Result<Vec<(u64, MatchRecord)>> {
         let at = self.records.partition_point(|r| r.0 <= after_seq);
         Ok(self.records[at..(at + limit).min(self.records.len())].to_vec())

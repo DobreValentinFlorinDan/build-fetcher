@@ -725,7 +725,7 @@ impl Recommender {
         let mut notes = vec![];
         let now = served.as_ref().map(|sv| {
             let x = self.live_situation(ctx, role, opponent, profile);
-            (sv.predict(&x), x)
+            (sv.predict_team(&x, self.live_team(ctx, &ctx.my_items, &x).as_ref()), x)
         });
         let mut next: Vec<(f64, RankedOption)> = cands
             .values()
@@ -744,7 +744,7 @@ impl Recommender {
                         let mut mine: Vec<i64> = ctx.my_items.iter().copied().filter(|i| !self.recipe_contains(id, *i)).collect();
                         mine.push(id);
                         y.combat = self.live_combat(ctx, &mine);
-                        let p = sv.predict(&y);
+                        let p = sv.predict_team(&y, self.live_team(ctx, &mine, &y).as_ref());
                         (p - p0, Some(p))
                     }
                     _ => (e.wpa, None),
@@ -892,6 +892,25 @@ impl Recommender {
         };
         let enemies: Vec<PlayerIn> = enemies.iter().map(|(c, l, v)| PlayerIn { champion: *c, level: *l, items: v }).collect();
         combat_vector(&self.data, &PlayerIn { champion: ctx.draft.champion, level: (ctx.my_level as f64).max(1.0), items: &mine }, &enemies)
+    }
+
+    /// The team network's view of the game (1.3.0): the user and the nine others from the Live Client. None without
+    /// the players list or the combat vector.
+    fn live_team(&self, ctx: &LiveContext, my_items: &[i64], x: &Situation) -> Option<crate::teamnet::TeamSample> {
+        use crate::teamnet::{player_x, TeamSample};
+        if ctx.players.is_empty() || x.combat.len() != crate::combat::COMBAT {
+            return None;
+        }
+        let keep = |v: &[i64]| -> Vec<i64> { v.iter().copied().filter(|i| self.classes.is_build_item(*i)).collect() };
+        let mut players = vec![player_x(&self.data, ctx.draft.champion, (ctx.my_level as f64).max(1.0), &keep(my_items))];
+        let mut ally = vec![true];
+        for p in &ctx.players {
+            players.push(player_x(&self.data, p.champion, (p.level as f64).max(1.0), &keep(&p.items)));
+            ally.push(p.ally);
+        }
+        let mut terms = [0.0f32; crate::combat::TERMS];
+        terms.copy_from_slice(&x.combat[bf_core::ddragon::ITEM_STATS..]);
+        Some(TeamSample { players, ally, me: 0, dense: x.state.dense(), terms })
     }
 
     /// `part` is somewhere in `id`'s recipe.

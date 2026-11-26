@@ -648,6 +648,12 @@ impl DataSource for Store {
         rows.into_iter().map(|(seq, b)| Ok((seq as u64, self.unpack(&b).map_err(|e| anyhow!("record {seq}: {e}"))?))).collect()
     }
 
+    fn timeline_count(&self) -> Result<u64> {
+        let r = self.r.lock();
+        let n: i64 = r.db.query_row("SELECT COUNT(*) FROM matches WHERE has_timeline = 1", [], |x| x.get(0))?;
+        Ok(n.max(0) as u64)
+    }
+
     fn validation_records(&self) -> Result<Vec<MatchRecord>> {
         let rows: Vec<Vec<u8>> = {
             let r = self.r.lock();

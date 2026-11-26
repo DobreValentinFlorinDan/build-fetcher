@@ -11,6 +11,7 @@
 use crate::features::{PatchClock, Situation};
 use crate::logistic::{LogisticModel, DIM};
 use crate::nn::{SharedNet, PARAMS};
+use crate::teamnet::{TeamNet, TEAM_PARAMS};
 use anyhow::{bail, Context, Result};
 use bf_core::build::{CheckpointInfo, Metrics};
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,8 @@ use std::path::{Path, PathBuf};
 
 pub const LOGISTIC: &str = "logistic";
 pub const SHARED_NN: &str = "shared-nn";
+/// Model step 3, the team network (1.3.0).
+pub const TEAM_NN: &str = "team-nn";
 /// Checkpoints kept per kind (besides the active ones).
 pub const KEEP: usize = 8;
 /// Log lines kept in the file (older ones are cut when it grows past twice this).
@@ -51,6 +54,16 @@ pub struct Manifest {
     pub active_nn: Option<String>,
     pub clock: PatchClock,
     pub checkpoints: Vec<Entry>,
+    /// The team network (1.3.0): games with a timeline learnt so far (towards its threshold), whether it is awake,
+    /// how far it got through the stored backlog, and the version in force.
+    #[serde(default)]
+    pub timeline_seen: u64,
+    #[serde(default)]
+    pub team_awake: bool,
+    #[serde(default)]
+    pub team_cursor: u64,
+    #[serde(default)]
+    pub active_team: Option<String>,
 }
 
 impl Manifest {
@@ -67,7 +80,7 @@ impl Manifest {
                 created_ms: e.created_ms,
                 metrics: e.metrics.clone(),
                 records_seen: e.records_seen,
-                active: Some(&e.version) == self.active_logistic.as_ref() || Some(&e.version) == self.active_nn.as_ref(),
+                active: Some(&e.version) == self.active_logistic.as_ref() || Some(&e.version) == self.active_nn.as_ref() || Some(&e.version) == self.active_team.as_ref(),
             })
             .collect()
     }
@@ -193,6 +206,32 @@ pub fn decode_nn(b: &[u8]) -> Result<SharedNet> {
     Ok(SharedNet { p, m, v, t })
 }
 
+pub fn encode_team(n: &TeamNet) -> Vec<u8> {
+    let mut b = b"BFT1".to_vec();
+    put_u64(&mut b, n.t);
+    put_u32(&mut b, TEAM_PARAMS as u32);
+    for a in [&n.p, &n.m, &n.v] {
+        for x in a.iter() {
+            put_f64(&mut b, *x);
+        }
+    }
+    b
+}
+
+pub fn decode_team(b: &[u8]) -> Result<TeamNet> {
+    let mut r = Reader { b, at: 0 };
+    if r.take(4)? != b"BFT1" {
+        bail!("not a team network checkpoint");
+    }
+    let t = r.u64()?;
+    if r.u32()? as usize != TEAM_PARAMS {
+        bail!("team network checkpoint from a different architecture");
+    }
+    let mut read = || -> Result<Vec<f64>> { (0..TEAM_PARAMS).map(|_| r.f64()).collect() };
+    let (p, m, v) = (read()?, read()?, read()?);
+    Ok(TeamNet { p, m, v, t })
+}
+
 fn no_dicts(_: u16) -> Option<std::sync::Arc<Vec<u8>>> {
     None
 }
@@ -241,13 +280,17 @@ impl Store {
         decode_nn(&self.read_model(&e.file)?)
     }
 
+    pub fn load_team(&self, e: &Entry) -> Result<TeamNet> {
+        decode_team(&self.read_model(&e.file)?)
+    }
+
     /// Deletes all but the newest KEEP checkpoints of each kind (never an active one), from the manifest and disk.
     pub fn prune(&self, m: &mut Manifest) {
-        for kind in [LOGISTIC, SHARED_NN] {
+        for kind in [LOGISTIC, SHARED_NN, TEAM_NN] {
             let of_kind: Vec<String> = m.checkpoints.iter().filter(|e| e.kind == kind).map(|e| e.version.clone()).collect();
             let drop = of_kind.len().saturating_sub(KEEP);
             for v in of_kind.into_iter().take(drop) {
-                if Some(&v) == m.active_logistic.as_ref() || Some(&v) == m.active_nn.as_ref() {
+                if Some(&v) == m.active_logistic.as_ref() || Some(&v) == m.active_nn.as_ref() || Some(&v) == m.active_team.as_ref() {
                     continue;
                 }
                 if let Some(i) = m.checkpoints.iter().position(|e| e.version == v) {

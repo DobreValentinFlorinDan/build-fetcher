@@ -547,3 +547,11 @@ agreement, and write each change in the hand-over section of this file.
     - **Known over-count:** timeline records stored but not yet read when a run starts.
   - **`check`** logs the pool size and the fitted temperature, saying whether the fit ran (`CALIB_MIN_GAMES` is now
     public).
+- (lead, 2026-11-26, 1.3.3) **Per-window calibration factors** (user's log: the line fixed 10–30 min and broke 30+).
+  - **Model:** `LogisticModel.calib_win` holds 4 factors, one per window, applied after the line:
+    `(a0 + a1 t) × f[window] × z`.
+  - **`fit_windows`:** per window, Newton on the factor, then a cluster-robust Wald test (1 degree of freedom,
+    3.841). It needs at least `CALIB_WINDOW_GAMES` (100) matches in that window. The factors reset to 1 when the line
+    itself changes, because they are relative to it.
+  - **Checkpoints:** format BFL3 stores the factors; BFL1 and BFL2 load with factors of 1.
+  - **Test:** `window_factors_fix_what_a_line_cannot`.

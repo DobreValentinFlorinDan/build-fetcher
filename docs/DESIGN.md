@@ -486,3 +486,14 @@ agreement, and write each change in the hand-over section of this file.
     (real store to file).
   - **Lesson:** 1.2.0's UI change was not clicked in a browser before release. This one was, on the real server (see
     the release notes).
+- (lead, 2026-11-26, 1.2.2) **A calibration pool for continuous learning.**
+  - **User report:** every check rejected the draft on calibration (10–30 min, 0.10–0.17 against 0.03–0.08),
+    although its log loss was far better (0.62–0.65 against 0.684). The draft was reset twice.
+  - **Cause:** `Draft.cal` (held-out calibration examples) lived and died with each draft, at most about 174 matches
+    under 8 × 150 games. `fit_calibration` needs `CALIB_MIN_GAMES` (250), so a draft's temperature was never fitted.
+  - **Now:** `State.cal_pool` holds the newest `CAL_POOL_MATCHES` (2,000) calibration matches, never trained on.
+    - Fed by `absorb` and `train_step`.
+    - Refilled once per run from the last `CAL_POOL_SCAN` (20,000) records up to the cursor (`pool_fill`).
+    - `check` fits the draft's temperature on the pool before the guardrail. The guardrail is unchanged (the
+      user's choice: strict).
+  - **Not verified:** at the user's request (no new tests or measurements); CI ran the existing ones.

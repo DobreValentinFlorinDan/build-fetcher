@@ -757,7 +757,9 @@ fn team_network_sleeps_until_its_threshold_then_wakes_and_is_judged() {
     assert!(before >= src.timeline_count().unwrap(), "{before}");
     more(&mut src, 50, 45, false);
     l.absorb(&src, 1000, None, idle()).unwrap();
-    assert!(l.status().team.unwrap().games > before, "the count grows with each game learnt");
+    l.refresh_team(&src).unwrap();
+    assert!(l.status().team.unwrap().games > before, "the count grows with each game fetched");
+    assert!(l.status().team.unwrap().games >= src.timeline_count().unwrap(), "at least the games stored now");
     let r = l.check(&src, &policy).unwrap().expect("a check is due");
     assert!(r.steps.iter().all(|s| s.kind != "team-nn"), "asleep: not judged");
     // Every check says whether the calibration correction ran.
@@ -785,4 +787,21 @@ fn team_network_sleeps_until_its_threshold_then_wakes_and_is_judged() {
     l.absorb(&src, 1000, None, idle()).unwrap();
     let line = l.status().log.iter().find(|x| x.starts_with("Team network")).cloned().unwrap_or_default();
     assert!(line.starts_with("Team network: awake"), "{line}");
+}
+
+/// 1.3.4: before the first model nothing is learnt, but the count still follows the games stored (it stood at its
+/// start-up value on a fresh install).
+#[test]
+fn team_count_follows_fetching_before_the_first_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = source(100, 51);
+    let l = Learner::open(dir.path(), data(), quick()).unwrap();
+    l.refresh_team(&src).unwrap();
+    let first = l.status().team.unwrap().games;
+    assert_eq!(first, src.timeline_count().unwrap());
+    more(&mut src, 300, 52, false);
+    assert_eq!(l.absorb(&src, 1000, None, idle()).unwrap().outcome, Outcome::Waiting, "no model yet");
+    l.refresh_team(&src).unwrap();
+    assert_eq!(l.status().team.unwrap().games, src.timeline_count().unwrap());
+    assert!(l.status().team.unwrap().games > first);
 }

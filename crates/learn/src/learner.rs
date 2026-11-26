@@ -617,11 +617,7 @@ impl Learner {
         self.stop.store(false, Ordering::SeqCst);
         self.pool_fill(&mut st, src)?;
         if st.stored_timelines.is_none() {
-            let stored = src.timeline_count()?;
-            st.stored_timelines = Some(stored);
-            // The games stored when this run starts count once (1.3.2: before, the count was max(stored, learnt), so
-            // new games didn't show until they alone passed the stored ones).
-            st.manifest.timeline_seen = st.manifest.timeline_seen.max(stored);
+            st.stored_timelines = Some(src.timeline_count()?);
         }
         let start = st.draft.as_ref().map(|d| d.cursor).unwrap_or(st.manifest.cursor);
         let mut records = vec![];
@@ -724,7 +720,7 @@ impl Learner {
         draft.timeline += n_timeline;
         // Step 3: wake it up once there are enough games with a timeline, then let it learn these games and a slice of
         // the stored backlog.
-        let progress = st.manifest.timeline_seen + draft.timeline;
+        let progress = (st.manifest.timeline_seen + draft.timeline).max(st.stored_timelines.unwrap_or(0));
         if !st.manifest.team_awake && progress >= self.config.team.threshold {
             st.manifest.team_awake = true;
             st.team_draft = Some(TeamNet::new(self.config.team.net.seed ^ self.config.seed));
@@ -879,10 +875,12 @@ impl Learner {
     /// progress from the start (before the first game of this run is learnt).
     pub fn refresh_team(&self, src: &dyn DataSource) -> Result<()> {
         let mut st = self.state.lock();
+        // The games stored now (fetched, learnt or not: before the first model nothing is learnt yet), or those
+        // learnt so far if more (old ones may have been cleaned up). 1.3.4: called every minute, so the count follows
+        // fetching; it was taken once at start-up and then moved only with learning.
         let stored = src.timeline_count()?;
         st.stored_timelines = Some(stored);
-        st.manifest.timeline_seen = st.manifest.timeline_seen.max(stored);
-        let progress = st.manifest.timeline_seen + st.draft.as_ref().map(|d| d.timeline).unwrap_or(0);
+        let progress = (st.manifest.timeline_seen + st.draft.as_ref().map(|d| d.timeline).unwrap_or(0)).max(stored);
         *self.team_status.lock() = Some(self.team_text(&st, progress));
         *self.team_progress.lock() = Some(self.team_numbers(&st, progress));
         Ok(())

@@ -555,3 +555,8 @@ agreement, and write each change in the hand-over section of this file.
     itself changes, because they are relative to it.
   - **Checkpoints:** format BFL3 stores the factors; BFL1 and BFL2 load with factors of 1.
   - **Test:** `window_factors_fix_what_a_line_cannot`.
+- (lead, 2026-11-26, 1.3.4) **Team count follows fetching** (user: 7 shown, 122 stored, on a fresh install).
+  - `refresh_team` now runs every minute from the server's learning loop. It takes
+    `max(timeline_seen + draft.timeline, stored now)` and no longer changes `timeline_seen`, so repeated calls can't
+    double-count.
+  - `absorb` uses the same max with the latest stored count.

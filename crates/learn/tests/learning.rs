@@ -752,8 +752,16 @@ fn team_network_sleeps_until_its_threshold_then_wakes_and_is_judged() {
     assert_eq!(l.absorb(&src, 1000, None, idle()).unwrap().outcome, Outcome::Learned);
     let line = l.status().log.iter().find(|x| x.starts_with("Team network")).cloned().unwrap_or_default();
     assert!(line.starts_with("Team network: dormant,") && line.contains("of 4400 games with a timeline"), "{:?}", l.status().log);
+    // The count adds the new games to the stored ones (1.3.2: it used to be the larger of the two, so it stood still).
+    let before = l.status().team.unwrap().games;
+    assert!(before >= src.timeline_count().unwrap(), "{before}");
+    more(&mut src, 50, 45, false);
+    l.absorb(&src, 1000, None, idle()).unwrap();
+    assert!(l.status().team.unwrap().games > before, "the count grows with each game learnt");
     let r = l.check(&src, &policy).unwrap().expect("a check is due");
     assert!(r.steps.iter().all(|s| s.kind != "team-nn"), "asleep: not judged");
+    // Every check says whether the calibration correction ran.
+    assert!(r.log.iter().any(|x| x.starts_with("calibration: ") && x.contains("held-out matches in the pool")), "{:#?}", r.log);
 
     // 900 more: past the threshold, it wakes up and learns.
     more(&mut src, 900, 43, false);

@@ -272,7 +272,7 @@ impl Default for LogisticModel {
 /// Fewer held-out matches than this: the calibration in force is kept. A cluster-robust covariance needs a few hundred
 /// clusters before its own uncertainty is small; with about 200 a significant-looking line still misjudged the late
 /// game on synthetic data. An update of 2,000 records holds out about 285.
-const CALIB_MIN_GAMES: usize = 250;
+pub const CALIB_MIN_GAMES: usize = 250;
 /// The Wald statistic a change of the temperature line must exceed: the 95% point of χ² with 2 degrees of freedom.
 const CALIB_WALD: f64 = 5.991;
 

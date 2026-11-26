@@ -617,7 +617,11 @@ impl Learner {
         self.stop.store(false, Ordering::SeqCst);
         self.pool_fill(&mut st, src)?;
         if st.stored_timelines.is_none() {
-            st.stored_timelines = Some(src.timeline_count()?);
+            let stored = src.timeline_count()?;
+            st.stored_timelines = Some(stored);
+            // The games stored when this run starts count once (1.3.2: before, the count was max(stored, learnt), so
+            // new games didn't show until they alone passed the stored ones).
+            st.manifest.timeline_seen = st.manifest.timeline_seen.max(stored);
         }
         let start = st.draft.as_ref().map(|d| d.cursor).unwrap_or(st.manifest.cursor);
         let mut records = vec![];
@@ -720,7 +724,7 @@ impl Learner {
         draft.timeline += n_timeline;
         // Step 3: wake it up once there are enough games with a timeline, then let it learn these games and a slice of
         // the stored backlog.
-        let progress = (st.manifest.timeline_seen + draft.timeline).max(st.stored_timelines.unwrap_or(0));
+        let progress = st.manifest.timeline_seen + draft.timeline;
         if !st.manifest.team_awake && progress >= self.config.team.threshold {
             st.manifest.team_awake = true;
             st.team_draft = Some(TeamNet::new(self.config.team.net.seed ^ self.config.seed));
@@ -877,7 +881,8 @@ impl Learner {
         let mut st = self.state.lock();
         let stored = src.timeline_count()?;
         st.stored_timelines = Some(stored);
-        let progress = (st.manifest.timeline_seen + st.draft.as_ref().map(|d| d.timeline).unwrap_or(0)).max(stored);
+        st.manifest.timeline_seen = st.manifest.timeline_seen.max(stored);
+        let progress = st.manifest.timeline_seen + st.draft.as_ref().map(|d| d.timeline).unwrap_or(0);
         *self.team_status.lock() = Some(self.team_text(&st, progress));
         *self.team_progress.lock() = Some(self.team_numbers(&st, progress));
         Ok(())
@@ -1012,7 +1017,22 @@ impl Learner {
         let mut cand = d.logistic.clone();
         let cal: Vec<Sample> = st.cal_pool.iter().flatten().cloned().collect();
         let cal_w: Vec<f64> = cal.iter().map(|s| sample_weight(s, &d.clock, &self.config.weights)).collect();
+        let calib_before = cand.calib;
         cand.fit_calibration(&cal, &cal_w, self.backend.as_ref());
+        // Whether the correction ran, on every check (1.3.2: only accepted updates showed the temperature).
+        let pool = st.cal_pool.len();
+        report.log.push(format!(
+            "calibration: {pool} held-out matches in the pool; temperature {:.3} + {:.3} per 10 min ({})",
+            cand.calib[0],
+            cand.calib[1],
+            if pool < crate::logistic::CALIB_MIN_GAMES {
+                format!("not fitted yet: needs {} matches", crate::logistic::CALIB_MIN_GAMES)
+            } else if cand.calib == calib_before {
+                "fitted, no significant change from the one in force".to_string()
+            } else {
+                "fitted".to_string()
+            }
+        ));
         let detail = format!("{} games learnt one by one since the model in force ({} checks kept it)", d.records, d.rejections);
         let accepted = self.judge_logistic(&mut st, src, cand.clone(), &val, d.records, &detail, &mut report)?;
         let mut accepted_any = accepted;

@@ -336,6 +336,11 @@ pub fn validate_patch(p: &SettingsPatch, known_champion: &dyn Fn(i64) -> bool) -
             return Err(ApiError::bad("The disk budget is between 256 MB and 1 TB."));
         }
     }
+    if let Some(v) = p.timeline_sample {
+        if !(0.0..=1.0).contains(&v) {
+            return Err(ApiError::bad("The timeline share is between 0% and 100%."));
+        }
+    }
     if let Some(t) = &mut p.tier_a {
         let mut seen = vec![];
         t.retain(|x| if seen.contains(x) { false } else { seen.push(*x); true });

@@ -158,6 +158,7 @@ impl RealStore {
             gpu: s.gpu,
             learning: s.learning,
             fetching: s.fetching,
+            timeline_sample: s.timeline_sample,
             first_run_complete: self.first_run_complete(),
         }
     }
@@ -234,6 +235,10 @@ impl StoreHandle for RealStore {
         if let Some(v) = patch.fetching {
             s.fetching = v;
             crate::bf_log!("[fetch] {}", if v { "resumed by you" } else { "paused by you" });
+        }
+        if let Some(v) = patch.timeline_sample {
+            s.timeline_sample = v;
+            crate::bf_log!("[fetch] timelines for other champions: {:.0}%", v * 100.0);
         }
         self.save(&s)?;
         if let Some(done) = patch.first_run_complete {

@@ -31,6 +31,209 @@ pub struct ItemMeta {
     pub armor: f64,
     pub magic_resist: f64,
     pub anti_heal: bool,
+    /// Every stat the shop shows (1.3.0), indexed by `STAT_*`: read from the description's `<stats>` block, which
+    /// lists all of them (the `stats` object lacks penetration, lethality, haste, omnivamp…), else from `stats`.
+    /// Percentages as fractions (35% armor penetration = 0.35).
+    pub stats: [f64; ITEM_STATS],
+    /// Effect flags (`EFFECT_*`) from the tags and the description.
+    pub effects: u16,
+}
+
+pub const ITEM_STATS: usize = 20;
+pub const STAT_AD: usize = 0;
+pub const STAT_AP: usize = 1;
+pub const STAT_AS: usize = 2;
+pub const STAT_CRIT: usize = 3;
+pub const STAT_CRIT_DMG: usize = 4;
+pub const STAT_LETHALITY: usize = 5;
+pub const STAT_ARMOR_PEN: usize = 6;
+pub const STAT_MAGIC_PEN: usize = 7;
+pub const STAT_MAGIC_PEN_PCT: usize = 8;
+pub const STAT_HASTE: usize = 9;
+pub const STAT_HP: usize = 10;
+pub const STAT_ARMOR: usize = 11;
+pub const STAT_MR: usize = 12;
+pub const STAT_LIFE_STEAL: usize = 13;
+pub const STAT_OMNIVAMP: usize = 14;
+pub const STAT_HEAL_SHIELD: usize = 15;
+pub const STAT_MS: usize = 16;
+pub const STAT_MS_PCT: usize = 17;
+pub const STAT_MANA: usize = 18;
+pub const STAT_TENACITY: usize = 19;
+pub const STAT_NAMES: [&str; ITEM_STATS] = [
+    "attack damage",
+    "ability power",
+    "attack speed",
+    "critical strike chance",
+    "critical strike damage",
+    "lethality",
+    "armor penetration",
+    "magic penetration",
+    "magic penetration %",
+    "ability haste",
+    "health",
+    "armor",
+    "magic resist",
+    "life steal",
+    "omnivamp",
+    "heal and shield power",
+    "move speed",
+    "move speed %",
+    "mana",
+    "tenacity",
+];
+
+pub const EFFECT_ON_HIT: u16 = 1;
+pub const EFFECT_ACTIVE: u16 = 2;
+pub const EFFECT_AURA: u16 = 4;
+pub const EFFECT_SLOW: u16 = 8;
+pub const EFFECT_WOUNDS: u16 = 16;
+pub const EFFECT_SHIELD: u16 = 32;
+/// Damage based on the target's health (max, current or missing).
+pub const EFFECT_HEALTH_DAMAGE: u16 = 64;
+pub const EFFECT_SPELLBLADE: u16 = 128;
+
+/// A champion's base stats and their growth per level (Data Dragon `stats`), for the combat math (1.3.0).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChampionBase {
+    pub hp: f64,
+    pub hp_per_level: f64,
+    pub armor: f64,
+    pub armor_per_level: f64,
+    pub mr: f64,
+    pub mr_per_level: f64,
+    pub ad: f64,
+    pub ad_per_level: f64,
+    pub attack_speed: f64,
+    /// Percent per level (2.5 = +2.5% attack speed per level).
+    pub attack_speed_per_level: f64,
+    pub move_speed: f64,
+}
+
+impl ChampionBase {
+    /// League's stat growth: base + growth × (level − 1) × (0.7025 + 0.0175 × (level − 1)).
+    pub fn grown(base: f64, per_level: f64, level: f64) -> f64 {
+        let n = (level.clamp(1.0, 18.0)) - 1.0;
+        base + per_level * n * (0.7025 + 0.0175 * n)
+    }
+    pub fn hp_at(&self, level: f64) -> f64 {
+        Self::grown(self.hp, self.hp_per_level, level)
+    }
+    pub fn armor_at(&self, level: f64) -> f64 {
+        Self::grown(self.armor, self.armor_per_level, level)
+    }
+    pub fn mr_at(&self, level: f64) -> f64 {
+        Self::grown(self.mr, self.mr_per_level, level)
+    }
+    pub fn ad_at(&self, level: f64) -> f64 {
+        Self::grown(self.ad, self.ad_per_level, level)
+    }
+    /// Bonus attack speed from levels, as a fraction (0.30 = +30%).
+    pub fn bonus_as_at(&self, level: f64) -> f64 {
+        Self::grown(0.0, self.attack_speed_per_level, level) / 100.0
+    }
+}
+
+/// Reads an item's stat lines: `<stats><attention>35%</attention> Armor Penetration<br>…</stats>`.
+pub fn parse_item_stats(desc: &str, stats_obj: Option<&Value>) -> [f64; ITEM_STATS] {
+    let mut out = [0.0; ITEM_STATS];
+    let block = desc.find("<stats>").and_then(|i| desc[i + 7..].find("</stats>").map(|j| &desc[i + 7..i + 7 + j]));
+    if let Some(block) = block {
+        for line in block.split("<br>") {
+            let text = strip_tags(line);
+            let text = text.trim();
+            let Some(sp) = text.find(' ') else { continue };
+            let (num, name) = (&text[..sp], text[sp + 1..].trim());
+            let pct = num.ends_with('%');
+            let Ok(v) = num.trim_end_matches('%').parse::<f64>() else { continue };
+            let v = if pct { v / 100.0 } else { v };
+            let k = match (name, pct) {
+                ("Attack Damage", _) => STAT_AD,
+                ("Ability Power", _) => STAT_AP,
+                ("Attack Speed", _) => STAT_AS,
+                ("Critical Strike Chance", _) => STAT_CRIT,
+                ("Critical Strike Damage", _) => STAT_CRIT_DMG,
+                ("Lethality", _) => STAT_LETHALITY,
+                ("Armor Penetration", _) => STAT_ARMOR_PEN,
+                ("Magic Penetration", false) => STAT_MAGIC_PEN,
+                ("Magic Penetration", true) => STAT_MAGIC_PEN_PCT,
+                ("Ability Haste", _) => STAT_HASTE,
+                ("Health", _) => STAT_HP,
+                ("Armor", _) => STAT_ARMOR,
+                ("Magic Resist", _) => STAT_MR,
+                ("Life Steal", _) => STAT_LIFE_STEAL,
+                ("Omnivamp", _) => STAT_OMNIVAMP,
+                ("Heal and Shield Power", _) => STAT_HEAL_SHIELD,
+                ("Move Speed", false) => STAT_MS,
+                ("Move Speed", true) => STAT_MS_PCT,
+                ("Mana", _) => STAT_MANA,
+                ("Tenacity", _) => STAT_TENACITY,
+                _ => continue,
+            };
+            out[k] += v;
+        }
+        return out;
+    }
+    let stat = |k: &str| stats_obj.and_then(|s| s.get(k)).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    out[STAT_AD] = stat("FlatPhysicalDamageMod");
+    out[STAT_AP] = stat("FlatMagicDamageMod");
+    out[STAT_AS] = stat("PercentAttackSpeedMod");
+    out[STAT_CRIT] = stat("FlatCritChanceMod");
+    out[STAT_HP] = stat("FlatHPPoolMod");
+    out[STAT_ARMOR] = stat("FlatArmorMod");
+    out[STAT_MR] = stat("FlatSpellBlockMod");
+    out[STAT_LIFE_STEAL] = stat("PercentLifeStealMod");
+    out[STAT_MS] = stat("FlatMovementSpeedMod");
+    out[STAT_MS_PCT] = stat("PercentMovementSpeedMod");
+    out[STAT_MANA] = stat("FlatMPPoolMod");
+    out
+}
+
+fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut inside = false;
+    for c in s.chars() {
+        match c {
+            '<' => inside = true,
+            '>' => inside = false,
+            _ if !inside => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Effect flags from an item's tags and description text.
+pub fn parse_item_effects(tags: &[String], desc: &str, anti_heal: bool) -> u16 {
+    let has = |t: &str| tags.iter().any(|x| x == t);
+    let text = strip_tags(desc).to_lowercase();
+    let mut e = 0;
+    if has("OnHit") || text.contains("on-hit") {
+        e |= EFFECT_ON_HIT;
+    }
+    if has("Active") {
+        e |= EFFECT_ACTIVE;
+    }
+    if has("Aura") {
+        e |= EFFECT_AURA;
+    }
+    if has("Slow") || text.contains("slows") {
+        e |= EFFECT_SLOW;
+    }
+    if anti_heal || text.contains("wounds") || text.contains("grievous") {
+        e |= EFFECT_WOUNDS;
+    }
+    if text.contains("shield") {
+        e |= EFFECT_SHIELD;
+    }
+    if text.contains("max health") || text.contains("maximum health") || text.contains("current health") || text.contains("missing health") || text.contains("bonus health") {
+        e |= EFFECT_HEALTH_DAMAGE;
+    }
+    if text.contains("spellblade") {
+        e |= EFFECT_SPELLBLADE;
+    }
+    e
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -50,6 +253,8 @@ pub struct ChampionMeta {
     pub tags: Vec<String>,
     pub info: ChampionInfo,
     pub attack_range: f64,
+    /// Base stats and growth (1.3.0).
+    pub base: ChampionBase,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -304,6 +509,8 @@ pub fn build_static_data(
                 armor: stat("FlatArmorMod"),
                 magic_resist: stat("FlatSpellBlockMod"),
                 anti_heal: anti_heal(desc),
+                stats: parse_item_stats(desc, it.get("stats")),
+                effects: parse_item_effects(&strs("tags"), desc, anti_heal(desc)),
             },
         );
     }
@@ -329,6 +536,22 @@ pub fn build_static_data(
                     difficulty: 0.0,
                 }),
                 attack_range: c.get("stats").and_then(|s| s.get("attackrange")).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                base: {
+                    let st = |k: &str| c.get("stats").and_then(|s| s.get(k)).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    ChampionBase {
+                        hp: st("hp"),
+                        hp_per_level: st("hpperlevel"),
+                        armor: st("armor"),
+                        armor_per_level: st("armorperlevel"),
+                        mr: st("spellblock"),
+                        mr_per_level: st("spellblockperlevel"),
+                        ad: st("attackdamage"),
+                        ad_per_level: st("attackdamageperlevel"),
+                        attack_speed: st("attackspeed"),
+                        attack_speed_per_level: st("attackspeedperlevel"),
+                        move_speed: st("movespeed"),
+                    }
+                },
             };
             champions_by_key.insert(meta.key.clone(), id);
             champions_by_key.insert(meta.name.clone(), id);
@@ -402,4 +625,33 @@ pub fn spells_of(raw: &Value, champion_key: &str) -> Result<Vec<Spell>> {
             image: s.get("image").and_then(|i| i.get("full")).and_then(|v| v.as_str()).unwrap_or("").into(),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod stat_tests {
+    use super::*;
+
+    /// 1.3.0: every shop stat comes from the description's stat lines (Data Dragon 16.19.1 snapshot), and champions
+    /// carry their base stats.
+    #[test]
+    fn item_stats_effects_and_champion_bases() {
+        let d = crate::testkit::load_test_static_data();
+        let s = |id: i64| d.item(id).unwrap().stats;
+        // Lord Dominik's: 35 AD, 35% armor pen, 25% crit (armor pen isn't in Data Dragon's `stats` object).
+        assert_eq!((s(3036)[STAT_AD], s(3036)[STAT_ARMOR_PEN], s(3036)[STAT_CRIT]), (35.0, 0.35, 0.25));
+        // Void Staff: 40% magic pen; Sorcerer's Shoes: 12 flat magic pen and 45 move speed.
+        assert_eq!((s(3135)[STAT_AP], s(3135)[STAT_MAGIC_PEN_PCT]), (95.0, 0.4));
+        assert_eq!((s(3020)[STAT_MAGIC_PEN], s(3020)[STAT_MS]), (12.0, 45.0));
+        // Infinity Edge's crit damage, Black Cleaver's health and haste.
+        assert_eq!(s(3031)[STAT_CRIT_DMG], 0.3);
+        assert_eq!((s(3071)[STAT_HP], s(3071)[STAT_HASTE]), (400.0, 20.0));
+        let e = |id: i64| d.item(id).unwrap().effects;
+        assert!(e(3153) & EFFECT_ON_HIT != 0 && e(3153) & EFFECT_HEALTH_DAMAGE != 0, "Blade of the Ruined King");
+        assert!(e(3033) & EFFECT_WOUNDS != 0, "Mortal Reminder");
+        let irelia = d.champion(39).unwrap().base;
+        assert!(irelia.hp > 500.0 && irelia.armor > 20.0 && irelia.attack_speed > 0.5, "{irelia:?}");
+        // Growth: level 1 is the base, level 18 the base + 17 levels of growth.
+        assert_eq!(irelia.armor_at(1.0), irelia.armor);
+        assert!((irelia.armor_at(18.0) - (irelia.armor + irelia.armor_per_level * 17.0)).abs() < 1e-9);
+    }
 }

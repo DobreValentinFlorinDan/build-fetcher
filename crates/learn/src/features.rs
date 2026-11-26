@@ -78,6 +78,10 @@ pub struct Situation {
     pub enemy_items: Vec<i64>,
     #[serde(default)]
     pub enemy_tags: [f64; ENEMY_TAGS],
+    /// The combat vector (1.3.0, `combat::combat_vector`): the build's stats and what they do against the enemy's.
+    /// Empty without a timeline, and in the stored draft contexts.
+    #[serde(default)]
+    pub combat: Vec<f32>,
 }
 
 /// What an enemy team's items add up to, one level per tag: armor, magic resist, healing (life steal, omnivamp),
@@ -106,6 +110,9 @@ pub struct Sample {
     /// match is one independent piece of evidence.
     #[serde(default)]
     pub game: u64,
+    /// The player's index in the record (1.3.0: the team network rebuilds the whole team from the record).
+    #[serde(default)]
+    pub player: u8,
 }
 
 impl Sample {
@@ -272,6 +279,7 @@ fn draft_situation(r: &MatchRecord, i: usize, data: &StaticData) -> Situation {
         state: GameState::default(),
         enemy_items: vec![],
         enemy_tags: [0.0; ENEMY_TAGS],
+        combat: vec![],
     }
 }
 
@@ -308,7 +316,7 @@ pub fn samples_of(r: &MatchRecord, data: &StaticData, classes: &ItemClasses) -> 
         let base = draft_situation(r, i, data);
         let group = hash(&[key_id(&r.match_id), p.team as i64]);
         let game = hash(&[key_id(&r.match_id)]);
-        let make = |situation: Situation| Sample { situation, won: p.win, is_me: p.is_me, version: r.version, rank: r.rank, group, game };
+        let make = |situation: Situation| Sample { situation, won: p.win, is_me: p.is_me, version: r.version, rank: r.rank, group, game, player: i as u8 };
         if !r.has_timeline() || r.frames.get(i).map(|f| f.is_empty()).unwrap_or(true) {
             out.push(make(base));
             continue;
@@ -334,6 +342,17 @@ pub fn samples_of(r: &MatchRecord, data: &StaticData, classes: &ItemClasses) -> 
                 .flat_map(|(j, _)| owned[j][k].0.iter().copied().chain(owned[j][k].1))
                 .collect();
             s.enemy_tags = classes.enemy_tag_levels(&s.enemy_items);
+            // The combat math: everyone's level from the frames, items from the purchase logs.
+            let level = |j: usize| r.frames.get(j).and_then(|fr| fr.get(m as usize)).map(|f| f.level as f64).unwrap_or(1.0);
+            let kit: Vec<Vec<i64>> = (0..r.players.len()).map(|j| owned[j][k].0.iter().copied().chain(owned[j][k].1).collect()).collect();
+            let enemies: Vec<crate::combat::PlayerIn> = r
+                .players
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| q.team != p.team && q.champion > 0)
+                .map(|(j, q)| crate::combat::PlayerIn { champion: q.champion, level: level(j), items: &kit[j] })
+                .collect();
+            s.combat = crate::combat::combat_vector(data, &crate::combat::PlayerIn { champion: p.champion, level: level(i), items: &kit[i] }, &enemies);
             s.state = GameState {
                 minute: m as f64,
                 gold_diff: of.map(|o| f.total_gold as f64 - o.total_gold as f64).unwrap_or(0.0),
@@ -348,6 +367,30 @@ pub fn samples_of(r: &MatchRecord, data: &StaticData, classes: &ItemClasses) -> 
         }
     }
     out
+}
+
+/// The team network's view of an example (1.3.0): every player of the record at the example's minute. None for a
+/// draft-only example (no timeline): the network adds nothing there.
+pub fn team_sample(r: &MatchRecord, s: &Sample, data: &StaticData, classes: &ItemClasses) -> Option<crate::teamnet::TeamSample> {
+    if s.situation.combat.is_empty() || !r.has_timeline() {
+        return None;
+    }
+    let i = s.player as usize;
+    let me = r.players.get(i)?;
+    let m = s.situation.state.minute as usize;
+    let at = m as u32 * 60;
+    let mut players = Vec::with_capacity(r.players.len());
+    let mut ally = Vec::with_capacity(r.players.len());
+    for (j, q) in r.players.iter().enumerate() {
+        let (items, boots) = owned_at(&q.purchases, at, classes);
+        let kit: Vec<i64> = items.into_iter().chain(boots).collect();
+        let level = r.frames.get(j).and_then(|fr| fr.get(m)).map(|f| f.level as f64).unwrap_or(1.0);
+        players.push(crate::teamnet::player_x(data, q.champion, level, &kit));
+        ally.push(q.team == me.team);
+    }
+    let mut terms = [0.0f32; crate::combat::TERMS];
+    terms.copy_from_slice(&s.situation.combat[bf_core::ddragon::ITEM_STATS..]);
+    Some(crate::teamnet::TeamSample { players, ally, me: i, dense: s.situation.state.dense(), terms })
 }
 
 // ------------------------------------------------------------------------------------------------ weights

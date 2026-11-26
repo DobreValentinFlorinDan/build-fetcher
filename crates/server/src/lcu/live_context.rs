@@ -44,6 +44,7 @@ pub fn live_context(raw: &Value, data: &StaticData, fallback_role: Option<Role>)
     let mut allies = vec![];
     let mut enemies = vec![];
     let mut enemy_items = vec![];
+    let mut others = vec![];
     let (mut team_kills, mut enemy_kills) = (0u64, 0u64);
     for (i, p) in players.iter().enumerate() {
         let kills = u(&p["scores"]["kills"]);
@@ -56,6 +57,7 @@ pub fn live_context(raw: &Value, data: &StaticData, fallback_role: Option<Role>)
             continue;
         }
         let Some(c) = champion_id(p, data) else { continue };
+        others.push(bf_core::build::LivePlayer { champion: c, role: role(p), ally: mine(p), level: u(&p["level"]).min(18) as u8, items: items(p) });
         if mine(p) {
             allies.push((c, role(p)));
         } else {
@@ -110,6 +112,7 @@ pub fn live_context(raw: &Value, data: &StaticData, fallback_role: Option<Role>)
         towers,
         dragons,
         barons,
+        players: others,
     })
 }
 

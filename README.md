@@ -123,6 +123,10 @@ The model predicts the win chance from:
 - runes, summoners, items owned and their order;
 - the enemy team's items at that minute: what share of their build is armor, magic resist, healing, anti-heal,
   ability power, attack damage and health, and how each of your items does against each of those;
+- League's combat math (1.3.0), from Data Dragon's item stat lines and champion base stats at each player's level:
+  your build's stats per 1,000 gold, how much of your damage gets through the enemy's armor and magic resist after
+  your penetration, your resistances against their damage mix, crit and on-hit with attack speed, haste on casters,
+  sustain against anti-heal, and wasted stats. Each champion and role learns its own taste for each stat;
 - the game state: time, gold, CS and level difference to the lane opponent, kills, towers, dragons and barons.
 
 Every player of every stored game counts, winners and losers alike: an item's effect shows only next to the games it
@@ -133,6 +137,10 @@ The Model page says how many games were learnt since the last accepted model.
 
 1. **Step 1:** a logistic model per champion-role, shrunk toward a global model.
 2. **Step 2:** a small shared network on top, with champion, item, rune, summoner and skill-order embeddings.
+3. **Step 3, the team network (1.3.0):** a larger network that looks at all ten players at once (champion, items,
+   build stats, base stats at their level). It is dormant until 200,000 games with a timeline exist; the Model page
+   shows the progress. Then it wakes up on its own, learns every new game and the stored backlog, and goes live only
+   once it passes the same check, on top of steps 1 and 2.
 
 **Guardrails.** Every update is checked on held-out games: log loss, Brier score, and calibration error per 10-minute
 window. An update that makes any of them worse is rejected and the previous checkpoint is kept. Checkpoints are

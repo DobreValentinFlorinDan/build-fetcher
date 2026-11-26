@@ -6,7 +6,7 @@ members = ["crates/core", "crates/store", "crates/learn", "crates/server", "crat
 default-members = ["crates/core", "crates/store", "crates/learn", "crates/server", "crates/desktop"]
 
 [workspace.package]
-version = "1.2.2"
+version = "1.3.0"
 edition = "2021"
 license = "UNLICENSED"
 publish = false

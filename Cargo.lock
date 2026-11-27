@@ -303,7 +303,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bf-core"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "bf-desktop"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "bf-core",
  "chrono",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "bf-learn"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "anyhow",
  "bf-core",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "bf-server"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "bf-store"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "anyhow",
  "bf-core",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "build-fetcher"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "anyhow",
  "bf-core",

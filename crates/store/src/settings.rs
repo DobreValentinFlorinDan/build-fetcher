@@ -244,13 +244,19 @@ pub fn set_key_at(file: &Path, key: &str) -> Result<String> {
 
 // ------------------------------------------------------------------------------------------------ extra keys
 
-/// The stored extra keys (trimmed, blanks skipped), in the order they were added. Never log or display these.
+/// The stored extra keys (trimmed, blanks and repeats skipped), in the order they were added. A key that is also the
+/// main key isn't an extra key (the main key can be set to one that was added as an extra), so it isn't listed or
+/// counted twice. Never log or display these.
 pub fn extra_keys(file: &Path) -> Vec<String> {
-    bf_core::app_config::read_config_at(file)
-        .get(EXTRA_KEYS_FIELD)
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
-        .unwrap_or_default()
+    let cfg = bf_core::app_config::read_config_at(file);
+    let main = cfg.get(KEY_FIELD).and_then(|v| v.as_str()).map(|s| s.trim().to_string()).unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    for k in cfg.get(EXTRA_KEYS_FIELD).and_then(|v| v.as_array()).into_iter().flatten().filter_map(|v| v.as_str()).map(|s| s.trim()) {
+        if !k.is_empty() && k != main && !out.iter().any(|o| o == k) {
+            out.push(k.to_string());
+        }
+    }
+    out
 }
 
 /// Every key the client should use: the main key first, then the extra keys, without repeats.
@@ -278,8 +284,10 @@ fn write_extra_keys(file: &Path, keys: &[String]) -> Result<()> {
 /// Adds an extra key. There is no limit to how many. Returns its masked form; errors never contain the key.
 pub fn add_extra_key_at(file: &Path, key: &str) -> Result<String> {
     let k = check_key(key)?;
-    if api_key(file).as_deref() == Some(k.as_str()) {
-        bail!("That key is already the main key");
+    match api_key(file) {
+        None => bail!("Set the main key first"),
+        Some(main) if main == k => bail!("That key is already the main key"),
+        Some(_) => {}
     }
     let mut keys = extra_keys(file);
     if keys.contains(&k) {
@@ -386,5 +394,23 @@ mod tests {
         remove_extra_key_at(&f, 0).unwrap();
         assert!(extra_keys(&f).is_empty());
         assert_eq!(api_key(&f).as_deref(), Some("RGAPI-00000000-main"), "the main key is untouched");
+    }
+
+    #[test]
+    fn an_extra_key_needs_a_main_key_and_is_not_counted_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("settings.json");
+        assert!(add_extra_key_at(&f, "RGAPI-11111111-aaaa").is_err(), "no main key yet");
+        assert!(extra_keys(&f).is_empty());
+        set_key_at(&f, "RGAPI-00000000-main").unwrap();
+        add_extra_key_at(&f, "RGAPI-11111111-aaaa").unwrap();
+        add_extra_key_at(&f, "RGAPI-22222222-bbbb").unwrap();
+        // The main key is replaced by one of the extra keys: it is listed once, as the main key.
+        set_key_at(&f, "RGAPI-11111111-aaaa").unwrap();
+        assert_eq!(extra_keys_masked(&f), vec!["RGAPI-…bbbb"]);
+        assert_eq!(all_keys(&f), vec!["RGAPI-11111111-aaaa", "RGAPI-22222222-bbbb"]);
+        remove_extra_key_at(&f, 0).unwrap();
+        assert!(extra_keys(&f).is_empty());
+        assert_eq!(api_key(&f).as_deref(), Some("RGAPI-11111111-aaaa"));
     }
 }

@@ -41,7 +41,9 @@ pub const BEFORE_DIR: &str = "before-import";
 const DB_ENTRY: &str = "data/build-fetcher.db";
 const CHECKPOINTS_PREFIX: &str = "data/checkpoints/";
 /// Settings this PC keeps whatever the archive says: where its data lives is this PC's business.
-const LOCAL_ONLY_SETTINGS: [&str; 1] = ["dataDir"];
+/// Settings that belong to this PC and never travel in a backup: the data folder, and the extra API keys (a backup
+/// carries at most the main key, and only when asked; importing keeps this PC's extra keys).
+const LOCAL_ONLY_SETTINGS: [&str; 2] = ["dataDir", crate::settings::EXTRA_KEYS_FIELD];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

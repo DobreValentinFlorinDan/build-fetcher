@@ -19,6 +19,7 @@ parking_lot.workspace = true
 tokio.workspace = true
 chrono.workspace = true
 rayon.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 filetime.workspace = true

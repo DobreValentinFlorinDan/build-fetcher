@@ -9,6 +9,61 @@ import { PLATFORMS, type ModelStatus, type AppSettings, type ExportReport, type 
 import { RollbackButtons, StorageCard } from './pages.tsx';
 import { desktop, type DesktopSettings } from './desktop.ts';
 
+/** Proof of concept: extra keys add their budgets to the main key's; each keeps its own rate limits. No limit to how many. */
+export function ExtraKeysPanel({ view, onChange }: { view: KeyView; onChange: (k: KeyView) => void }) {
+  const [adding, setAdding] = useState(false);
+  const [paste, setPaste] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async (f: () => Promise<KeyView>) => {
+    setBusy(true);
+    setError(null);
+    try { onChange(await f()); setPaste(''); setAdding(false); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="mt-4 space-y-3 border-t border-line pt-4">
+      <div>
+        <h3 className="text-sm font-semibold">API keys in use: {view.inUse}</h3>
+        <p className="text-xs text-muted">For testing: extra keys add to the fetching budget. Each key keeps its own rate limits, and a key Riot refuses is skipped.</p>
+      </div>
+      <ul className="space-y-1">
+        {view.set && (
+          <li className="flex items-center gap-2 text-sm">
+            <span className="font-mono text-fg">{view.masked}</span>
+            <span className="text-xs text-muted">main key</span>
+          </li>
+        )}
+        {view.extra.map((k, i) => (
+          <li key={`${i}-${k}`} className="flex items-center gap-2 text-sm">
+            <span className="font-mono text-fg">{k}</span>
+            <span className="text-xs text-muted">extra key {i + 1}</span>
+            <button disabled={busy} className="text-xs text-muted hover:text-fg disabled:opacity-40" onClick={() => run(() => api.del<KeyView>(`/api/key/extra/${i}`))}>Remove</button>
+          </li>
+        ))}
+      </ul>
+      {adding ? (
+        <form className="flex flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); if (looksLikeKey(paste)) run(() => api.post<KeyView>('/api/key/extra', { key: paste.trim() })); }}>
+          <input
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            autoFocus
+            placeholder="Paste an extra key (RGAPI-…)"
+            value={paste}
+            onChange={(e) => setPaste(e.target.value)}
+            className="w-80 rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-sm text-fg outline-none placeholder:text-muted"
+          />
+          <button disabled={busy || !looksLikeKey(paste)} className="rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-bg disabled:opacity-40">Add</button>
+          <button type="button" className="text-sm text-muted hover:text-fg" onClick={() => { setAdding(false); setPaste(''); setError(null); }}>Cancel</button>
+        </form>
+      ) : (
+        <button className="rounded-md border border-line px-3 py-1.5 text-sm text-fg" onClick={() => setAdding(true)}>Add Extra API Key</button>
+      )}
+      {error && <ErrorText>{error}</ErrorText>}
+    </div>
+  );
+}
+
 const REGION_NAMES: Record<Platform, string> = { EUN1: 'EU Nordic & East', EUW1: 'EU West', KR: 'Korea' };
 
 export function KeyPanel({ view, onChange }: { view: KeyView; onChange: (k: KeyView) => void }) {
@@ -97,6 +152,7 @@ export function SettingsPage() {
     <div className="grid gap-4 lg:grid-cols-2">
       <Card title="Riot API key" className="lg:col-span-2">
         <KeyPanel view={view.key} onChange={(k) => setView({ ...view, key: k })} />
+        <ExtraKeysPanel view={view.key} onChange={(k) => setView({ ...view, key: k })} />
       </Card>
       {error && <div className="lg:col-span-2"><ErrorText>{error}</ErrorText></div>}
       <Card title="Regions and rank">

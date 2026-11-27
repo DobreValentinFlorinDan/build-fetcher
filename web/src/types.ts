@@ -173,7 +173,7 @@ export type AppSettings = {
 
 export type KeyOffer = { state: 'available' | 'missing' | 'empty' } | { state: 'unreadable'; reason: string };
 
-export type KeyView = { masked: string; set: boolean; error: string | null; ireliaOffer: KeyOffer; portal: string };
+export type KeyView = { masked: string; set: boolean; error: string | null; ireliaOffer: KeyOffer; extra: string[]; inUse: number; portal: string };
 export type SettingsView = { settings: AppSettings; key: KeyView };
 
 export type PartResult = { ok: boolean; error?: string; replaced: boolean };

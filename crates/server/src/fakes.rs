@@ -203,11 +203,12 @@ pub struct FakeKeys {
     pub key: Mutex<Option<String>>,
     pub irelia_key: Mutex<Option<String>>,
     pub error: Mutex<Option<String>>,
+    pub extra: Mutex<Vec<String>>,
 }
 
 impl FakeKeys {
     pub fn new(offer: KeyOffer) -> FakeKeys {
-        FakeKeys { offer: Mutex::new(offer), key: Mutex::new(None), irelia_key: Mutex::new(None), error: Mutex::new(None) }
+        FakeKeys { offer: Mutex::new(offer), key: Mutex::new(None), irelia_key: Mutex::new(None), error: Mutex::new(None), extra: Mutex::new(vec![]) }
     }
 }
 
@@ -237,6 +238,25 @@ impl KeyHandle for FakeKeys {
     }
     fn key_error(&self) -> Option<String> {
         self.error.lock().clone()
+    }
+    fn extra_keys_masked(&self) -> Vec<String> {
+        self.extra.lock().iter().map(|k| mask_key(k)).collect()
+    }
+    fn add_extra_key(&self, key: &str) -> anyhow::Result<()> {
+        let mut extra = self.extra.lock();
+        if extra.iter().any(|k| k == key) || self.key.lock().as_deref() == Some(key) {
+            anyhow::bail!("That key is already in use");
+        }
+        extra.push(key.to_string());
+        Ok(())
+    }
+    fn remove_extra_key(&self, index: usize) -> anyhow::Result<()> {
+        let mut extra = self.extra.lock();
+        if index >= extra.len() {
+            anyhow::bail!("No extra key {}", index + 1);
+        }
+        extra.remove(index);
+        Ok(())
     }
 }
 

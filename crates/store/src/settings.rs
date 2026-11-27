@@ -28,6 +28,8 @@ pub const DEFAULT_TIMELINE_SAMPLE: f64 = 0.25;
 
 /// The settings file's key for the API key.
 pub const KEY_FIELD: &str = "riotApiKey";
+/// The settings file's key for the extra API keys (a list; proof of concept for testing a larger budget).
+pub const EXTRA_KEYS_FIELD: &str = "riotExtraApiKeys";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -240,6 +242,64 @@ pub fn set_key_at(file: &Path, key: &str) -> Result<String> {
     Ok(mask_key(&k))
 }
 
+// ------------------------------------------------------------------------------------------------ extra keys
+
+/// The stored extra keys (trimmed, blanks skipped), in the order they were added. Never log or display these.
+pub fn extra_keys(file: &Path) -> Vec<String> {
+    bf_core::app_config::read_config_at(file)
+        .get(EXTRA_KEYS_FIELD)
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// Every key the client should use: the main key first, then the extra keys, without repeats.
+pub fn all_keys(file: &Path) -> Vec<String> {
+    let mut out: Vec<String> = api_key(file).into_iter().collect();
+    for k in extra_keys(file) {
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    out
+}
+
+/// The extra keys as the dashboard may see them (masked), in order.
+pub fn extra_keys_masked(file: &Path) -> Vec<String> {
+    extra_keys(file).iter().map(|k| mask_key(k)).collect()
+}
+
+fn write_extra_keys(file: &Path, keys: &[String]) -> Result<()> {
+    let v = if keys.is_empty() { None } else { Some(json!(keys)) };
+    bf_core::app_config::update_config_at(file, vec![(EXTRA_KEYS_FIELD, v)]).map_err(|(_, e)| anyhow::anyhow!("Could not write settings: {e}"))?;
+    Ok(())
+}
+
+/// Adds an extra key. There is no limit to how many. Returns its masked form; errors never contain the key.
+pub fn add_extra_key_at(file: &Path, key: &str) -> Result<String> {
+    let k = check_key(key)?;
+    if api_key(file).as_deref() == Some(k.as_str()) {
+        bail!("That key is already the main key");
+    }
+    let mut keys = extra_keys(file);
+    if keys.contains(&k) {
+        bail!("That key is already in the list");
+    }
+    keys.push(k.clone());
+    write_extra_keys(file, &keys)?;
+    Ok(mask_key(&k))
+}
+
+/// Removes the extra key at `index` (as `extra_keys_masked` lists them).
+pub fn remove_extra_key_at(file: &Path, index: usize) -> Result<()> {
+    let mut keys = extra_keys(file);
+    if index >= keys.len() {
+        bail!("No extra key {}", index + 1);
+    }
+    keys.remove(index);
+    write_extra_keys(file, &keys)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +365,26 @@ mod tests {
         assert!(!e.contains("0000"), "{e}");
         assert!(set_key_at(&f, "   ").is_err());
         assert_eq!(api_key(&f).as_deref(), Some("RGAPI-00000000-test"), "a rejected key leaves the old one");
+    }
+
+    #[test]
+    fn extra_keys_add_list_and_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("settings.json");
+        set_key_at(&f, "RGAPI-00000000-main").unwrap();
+        assert!(add_extra_key_at(&f, "RGAPI-00000000-main").is_err(), "the main key is not an extra key");
+        assert_eq!(add_extra_key_at(&f, " RGAPI-11111111-aaaa ").unwrap(), "RGAPI-…aaaa");
+        assert_eq!(add_extra_key_at(&f, "RGAPI-22222222-bbbb").unwrap(), "RGAPI-…bbbb");
+        assert!(add_extra_key_at(&f, "RGAPI-22222222-bbbb").is_err(), "no repeats");
+        assert_eq!(extra_keys_masked(&f), vec!["RGAPI-…aaaa", "RGAPI-…bbbb"]);
+        assert_eq!(all_keys(&f), vec!["RGAPI-00000000-main", "RGAPI-11111111-aaaa", "RGAPI-22222222-bbbb"]);
+        let shown = serde_json::to_string(&load(&f).0).unwrap();
+        assert!(!shown.contains("RGAPI"), "the dashboard's settings JSON never carries a key");
+        remove_extra_key_at(&f, 0).unwrap();
+        assert_eq!(extra_keys_masked(&f), vec!["RGAPI-…bbbb"]);
+        assert!(remove_extra_key_at(&f, 5).is_err());
+        remove_extra_key_at(&f, 0).unwrap();
+        assert!(extra_keys(&f).is_empty());
+        assert_eq!(api_key(&f).as_deref(), Some("RGAPI-00000000-main"), "the main key is untouched");
     }
 }

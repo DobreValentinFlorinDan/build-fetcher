@@ -175,6 +175,12 @@ pub trait KeyHandle: Send + Sync {
     fn key_masked(&self) -> String;
     /// Riot's last refusal of the key ("401 Unauthorized", "403 Forbidden"), until a new key is set.
     fn key_error(&self) -> Option<String>;
+    /// The extra keys (proof of concept: a larger fetching budget for testing), masked, in the order they were added.
+    fn extra_keys_masked(&self) -> Vec<String>;
+    /// Adds an extra key (already trimmed and shape-checked by the server). No limit to how many.
+    fn add_extra_key(&self, key: &str) -> anyhow::Result<()>;
+    /// Removes the extra key at `index` (as `extra_keys_masked` lists them).
+    fn remove_extra_key(&self, index: usize) -> anyhow::Result<()>;
 }
 
 /// Everything the server is given.

@@ -546,28 +546,43 @@ impl<A: RiotApi + 'static> Fetcher<A> {
     async fn fetch_matches(&self, platform: Platform, ids: &[String], rank: RankBand, me: Option<&str>, signal: &Signal) -> Result<()> {
         let tier_a = self.inner.store.tier_a();
         let sample = self.inner.settings.lock().timeline_sample;
+        // With extra API keys, several games are fetched at once (one per usable key); they are stored in order.
+        let width = self.inner.api.parallelism().max(1);
+        let mut fresh = Vec::new();
         for id in ids {
-            signal.check()?;
-            if self.inner.store.is_seen(id)? {
-                continue;
+            if !self.inner.store.is_seen(id)? {
+                fresh.push(id.clone());
             }
-            // Match ids carry their platform ("EUW1_…"): fetch on that one's routing.
-            let on = id.split('_').next().and_then(Platform::parse).unwrap_or(platform);
-            self.note_request();
-            let Some(m) = self.inner.api.get_match(on.as_str(), id, signal).await? else { continue };
-            let timeline = if self.wants_timeline(&m, rank, me, &tier_a, sample) {
-                self.note_request();
-                self.inner.api.timeline(on.as_str(), id, signal).await?
-            } else {
-                None
-            };
-            let out = self.inner.store.ingest(&[Ingest { m: &m, timeline: timeline.as_ref(), rank, me }])?;
-            if matches!(out.first(), Some(Outcome::Counted { .. }) | Some(Outcome::Validation)) {
-                let now = self.now();
-                self.inner.st.lock().matches.push_back(now);
+        }
+        for chunk in fresh.chunks(width) {
+            signal.check()?;
+            let fetched = futures_util::future::join_all(chunk.iter().map(|id| self.fetch_one(platform, id, rank, me, &tier_a, sample, signal))).await;
+            for got in fetched {
+                let Some((m, timeline)) = got? else { continue };
+                let out = self.inner.store.ingest(&[Ingest { m: &m, timeline: timeline.as_ref(), rank, me }])?;
+                if matches!(out.first(), Some(Outcome::Counted { .. }) | Some(Outcome::Validation)) {
+                    let now = self.now();
+                    self.inner.st.lock().matches.push_back(now);
+                }
             }
         }
         Ok(())
+    }
+
+    /// One game and, if it wants one, its timeline.
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_one(&self, platform: Platform, id: &str, rank: RankBand, me: Option<&str>, tier_a: &HashSet<i64>, sample: f64, signal: &Signal) -> Result<Option<(Value, Option<Value>)>> {
+        // Match ids carry their platform ("EUW1_…"): fetch on that one's routing.
+        let on = id.split('_').next().and_then(Platform::parse).unwrap_or(platform);
+        self.note_request();
+        let Some(m) = self.inner.api.get_match(on.as_str(), id, signal).await? else { return Ok(None) };
+        let timeline = if self.wants_timeline(&m, rank, me, tier_a, sample) {
+            self.note_request();
+            self.inner.api.timeline(on.as_str(), id, signal).await?
+        } else {
+            None
+        };
+        Ok(Some((m, timeline)))
     }
 
     /// A timeline costs a request: only for games that will be kept with one.

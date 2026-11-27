@@ -77,6 +77,8 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .route("/api/settings", get(settings_get).patch(settings_patch))
         .route("/api/key", post(key_paste))
         .route("/api/key/import-irelia", post(key_import))
+        .route("/api/key/extra", post(extra_key_add))
+        .route("/api/key/extra/:index", axum::routing::delete(extra_key_remove))
         .route("/api/backup/export", post(backup_export))
         .route("/api/backup/import", post(backup_import))
         .route("/api/backup/pending", get(backup_pending))
@@ -297,6 +299,10 @@ pub struct KeyView {
     pub set: bool,
     pub error: Option<String>,
     pub irelia_offer: KeyOffer,
+    /// The extra keys (masked), in the order they were added.
+    pub extra: Vec<String>,
+    /// How many keys fetching spreads over (the main key plus the extra keys).
+    pub in_use: usize,
     /// Where to get or renew a key (shown with a 401/403).
     pub portal: &'static str,
 }
@@ -307,7 +313,9 @@ fn key_view(app: &App) -> KeyView {
         KeyOffer::Unreadable { reason } => KeyOffer::Unreadable { reason: scrub(&reason) },
         o => o,
     };
-    KeyView { set: !masked.is_empty(), masked: scrub(&masked), error: app.h.keys.key_error().map(|e| scrub(&e)), irelia_offer: offer, portal: DEVELOPER_PORTAL }
+    let extra: Vec<String> = app.h.keys.extra_keys_masked().iter().map(|k| scrub(k)).collect();
+    let in_use = usize::from(!masked.is_empty()) + extra.len();
+    KeyView { set: !masked.is_empty(), masked: scrub(&masked), error: app.h.keys.key_error().map(|e| scrub(&e)), irelia_offer: offer, extra, in_use, portal: DEVELOPER_PORTAL }
 }
 
 fn settings_view(app: &App) -> Value {
@@ -399,6 +407,24 @@ async fn key_import(State(app): State<Arc<App>>) -> Result<R, ApiError> {
     let me = app.clone();
     blocking(move || me.h.keys.import_irelia_key()).await?.map_err(|e| ApiError::conflict(format!("{e:#}")))?;
     crate::bf_log!("[key] Irelia Companion's key is used");
+    Ok(ok(blocking(move || key_view(&app)).await?))
+}
+
+/// Adds an extra key (proof of concept: a larger fetching budget for testing). No limit to how many.
+async fn extra_key_add(State(app): State<Arc<App>>, body: axum::body::Bytes) -> Result<R, ApiError> {
+    let b: KeyBody = serde_json::from_slice(&body).map_err(|_| ApiError::bad("Send { \"key\": \"RGAPI-…\" }."))?;
+    let key = b.key.trim().to_string();
+    check_key_shape(&key)?;
+    let me = app.clone();
+    blocking(move || me.h.keys.add_extra_key(&key)).await?.map_err(|e| ApiError::bad(format!("{e:#}")))?;
+    crate::bf_log!("[key] an extra key was added");
+    Ok(ok(blocking(move || key_view(&app)).await?))
+}
+
+async fn extra_key_remove(State(app): State<Arc<App>>, axum::extract::Path(index): axum::extract::Path<usize>) -> Result<R, ApiError> {
+    let me = app.clone();
+    blocking(move || me.h.keys.remove_extra_key(index)).await?.map_err(|e| ApiError::bad(format!("{e:#}")))?;
+    crate::bf_log!("[key] an extra key was removed");
     Ok(ok(blocking(move || key_view(&app)).await?))
 }
 

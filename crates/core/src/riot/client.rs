@@ -5,6 +5,10 @@
 //! Retry-After; a service 429 without one backs off exponentially. Answers are not cached here.
 //!
 //! The key is only ever sent in the X-Riot-Token header: errors name the status and the path, never the key.
+//!
+//! Extra keys (proof of concept, for testing): the client can hold any number of keys. Each key has its own limiter
+//! per host, so each keeps its own budget, and every request goes to the least busy key for its host. A key Riot
+//! rejects (401 / 403) is set aside and the others carry on; only when every key is rejected do the lanes stop.
 
 use super::rate_limiter::{limit_scope, retry_after_ms, sleep, wall_clock, Clock, Pacer, RateLimiter, Signal};
 use super::routing::{account_host, is_apex, platform_host, regional_host};
@@ -90,6 +94,10 @@ pub trait RiotApi: Send + Sync {
     fn budgets(&self) -> Vec<BudgetStatus> {
         vec![]
     }
+    /// How many requests the fetcher may have going at once on one routing value: one per usable key (1 for fakes).
+    fn parallelism(&self) -> usize {
+        1
+    }
     fn match_ids_page(&self, platform: &str, puuid: &str, q: &MatchIdQuery, signal: &Signal) -> impl Future<Output = Result<Vec<String>>> + Send;
     fn get_match(&self, platform: &str, id: &str, signal: &Signal) -> impl Future<Output = Result<Option<Value>>> + Send;
     fn timeline(&self, platform: &str, id: &str, signal: &Signal) -> impl Future<Output = Result<Option<Value>>> + Send;
@@ -107,14 +115,39 @@ pub struct ThrottleInfo {
     pub wait_ms: f64,
 }
 
+/// One API key and whether Riot has rejected it since it was set.
+#[derive(Clone)]
+struct KeySlot {
+    key: String,
+    rejected: bool,
+}
+
+fn slots(keys: &[String]) -> Vec<KeySlot> {
+    let mut out: Vec<KeySlot> = Vec::new();
+    for k in keys.iter().map(|k| k.trim()).filter(|k| !k.is_empty()) {
+        if !out.iter().any(|s| s.key == k) {
+            out.push(KeySlot { key: k.to_string(), rejected: false });
+        }
+    }
+    if out.is_empty() {
+        // No key: requests still go out (with an empty key) and Riot's 401 says so, as before.
+        out.push(KeySlot { key: String::new(), rejected: false });
+    }
+    out
+}
+
+/// Limiters by (key, host).
+type Limiters = indexmap::IndexMap<(String, String), Arc<RateLimiter>>;
+
 pub struct RiotClient<T: Transport = HttpTransport> {
     pub request_timeout_ms: u64,
     pub requests: AtomicU64,
     pub default_pace_ms: f64,
-    api_key: Mutex<String>,
+    keys: Mutex<Vec<KeySlot>>,
     limits: Vec<RateWindow>,
     pacing: PacingOptions,
-    limiters: Mutex<indexmap::IndexMap<String, Arc<RateLimiter>>>,
+    /// One limiter per (key, host). The map's key is internal only: nothing shows or logs it.
+    limiters: Mutex<Limiters>,
     throttle: Mutex<Option<Arc<dyn Fn(ThrottleInfo) + Send + Sync>>>,
     http: T,
     clock: Clock,
@@ -134,7 +167,7 @@ impl<T: Transport> RiotClient<T> {
             request_timeout_ms: REQUEST_TIMEOUT_MS,
             requests: AtomicU64::new(0),
             default_pace_ms: Pacer::new(&limits, pacing).spacing(clock()),
-            api_key: Mutex::new(api_key.to_string()),
+            keys: Mutex::new(slots(&[api_key.to_string()])),
             limits,
             pacing,
             limiters: Mutex::new(indexmap::IndexMap::new()),
@@ -158,8 +191,38 @@ impl<T: Transport> RiotClient<T> {
 
     /// Each host's application budget as the dashboard meter shows it: Riot's count in the longest window (every
     /// app on the key), how much of it was ours, and whether another app is spending the same key.
+    /// With several keys, a host's meter adds up every key's budget ("20:1,100:120 × 3 keys").
     pub fn budget_statuses(&self) -> Vec<BudgetStatus> {
-        let limiters: Vec<Arc<RateLimiter>> = self.limiters.lock().values().cloned().collect();
+        let mut by_host: indexmap::IndexMap<String, (BudgetStatus, usize)> = indexmap::IndexMap::new();
+        for b in self.key_budget_statuses() {
+            match by_host.get_mut(&b.scope) {
+                Some((sum, n)) => {
+                    sum.used += b.used;
+                    sum.ours += b.ours;
+                    sum.limit += b.limit;
+                    sum.shared |= b.shared;
+                    *n += 1;
+                }
+                None => {
+                    by_host.insert(b.scope.clone(), (b, 1));
+                }
+            }
+        }
+        by_host
+            .into_values()
+            .map(|(mut b, n)| {
+                if n > 1 {
+                    b.limits = format!("{} × {n} keys", b.limits);
+                }
+                b
+            })
+            .collect()
+    }
+
+    /// One budget per (key in use, host).
+    fn key_budget_statuses(&self) -> Vec<BudgetStatus> {
+        let keys: Vec<String> = self.keys.lock().iter().map(|k| k.key.clone()).collect();
+        let limiters: Vec<Arc<RateLimiter>> = self.limiters.lock().iter().filter(|((k, _), _)| keys.contains(k)).map(|(_, l)| l.clone()).collect();
         limiters
             .iter()
             .map(|l| {
@@ -182,15 +245,63 @@ impl<T: Transport> RiotClient<T> {
             .collect()
     }
 
+    /// One key (the old single-key setup). Same as `set_api_keys(&[key])`.
     pub fn set_api_key(&self, key: &str) {
-        *self.api_key.lock() = key.to_string();
+        self.set_api_keys(&[key.to_string()]);
+    }
+
+    /// Every key to spread requests over: the main key first, then any extra keys. Blank and repeated keys are
+    /// skipped. Rejections are forgotten (a new key list gets a fresh chance). A key kept from the old list keeps its
+    /// limiters, so its budget carries over.
+    pub fn set_api_keys(&self, keys: &[String]) {
+        let next = slots(keys);
+        let keep: Vec<String> = next.iter().map(|k| k.key.clone()).collect();
+        self.limiters.lock().retain(|(k, _), _| keep.contains(k));
+        *self.keys.lock() = next;
+    }
+
+    /// Keys in use that Riot hasn't rejected (at least 1).
+    pub fn key_count(&self) -> usize {
+        self.keys.lock().iter().filter(|k| !k.rejected).count().max(1)
     }
     pub fn on_throttle(&self, f: Option<Arc<dyn Fn(ThrottleInfo) + Send + Sync>>) {
         *self.throttle.lock() = f;
     }
 
-    fn limiter(&self, host: &str) -> Arc<RateLimiter> {
-        self.limiters.lock().entry(host.to_string()).or_insert_with(|| RateLimiter::new(host, &self.limits, self.pacing, self.clock.clone())).clone()
+    fn limiter(&self, key: &str, host: &str) -> Arc<RateLimiter> {
+        self.limiters
+            .lock()
+            .entry((key.to_string(), host.to_string()))
+            .or_insert_with(|| RateLimiter::new(host, &self.limits, self.pacing, self.clock.clone()))
+            .clone()
+    }
+
+    /// The key (and its limiter for `host`) the next request should use: the least busy key Riot hasn't rejected,
+    /// the main key on a tie. None when every key was rejected.
+    fn pick(&self, host: &str, family: &'static str) -> Option<(String, Arc<RateLimiter>)> {
+        let keys: Vec<String> = self.keys.lock().iter().filter(|k| !k.rejected).map(|k| k.key.clone()).collect();
+        let mut best: Option<((usize, f64), String, Arc<RateLimiter>)> = None;
+        for k in keys {
+            let l = self.limiter(&k, host);
+            let load = l.load(family);
+            let better = match &best {
+                None => true,
+                Some((b, _, _)) => load.0 < b.0 || (load.0 == b.0 && load.1 < b.1),
+            };
+            if better {
+                best = Some((load, k, l));
+            }
+        }
+        best.map(|(_, k, l)| (k, l))
+    }
+
+    /// Riot rejected `key`: later requests use the other keys. True when another key is left.
+    fn reject(&self, key: &str) -> bool {
+        let mut keys = self.keys.lock();
+        for k in keys.iter_mut().filter(|k| k.key == key) {
+            k.rejected = true;
+        }
+        keys.iter().any(|k| !k.rejected)
     }
 
     /// Window usage of the busiest host.
@@ -232,16 +343,17 @@ impl<T: Transport> RiotClient<T> {
     }
 
     async fn get(&self, host: &str, family: &'static str, path: &str, signal: &Signal) -> Result<Option<Value>> {
-        let limiter = self.limiter(host);
         let mut attempt = 0;
         loop {
+            let Some((key, limiter)) = self.pick(host, family) else {
+                return Err(anyhow!(RiotAuthError("Riot API rejected every key. Check the keys in Settings (developer.riotgames.com).".into())));
+            };
             let permit = limiter.acquire(family, Some(signal)).await?;
             self.requests.fetch_add(1, Ordering::SeqCst);
             let url = match self.base_url.lock().clone() {
                 Some(b) => format!("{b}{path}"),
                 None => format!("https://{host}{path}"),
             };
-            let key = self.api_key.lock().clone();
             let sent_at = permit.started_at;
             let send = async {
                 let res = self.http.get(&url, &key).await?;
@@ -279,6 +391,10 @@ impl<T: Transport> RiotClient<T> {
                 return Ok(None);
             }
             if status == 401 || status == 403 {
+                // Another key may still work: try it (this doesn't count as an attempt; each key is rejected once).
+                if self.reject(&key) {
+                    continue;
+                }
                 return Err(anyhow!(RiotAuthError(format!(
                     "Riot API rejected the key ({status}). Check the key in Settings (developer.riotgames.com)."
                 ))));
@@ -350,6 +466,10 @@ impl<T: Transport> RiotApi for RiotClient<T> {
 
     fn budgets(&self) -> Vec<BudgetStatus> {
         self.budget_statuses()
+    }
+
+    fn parallelism(&self) -> usize {
+        self.key_count()
     }
 
     async fn league_entries(&self, platform: &str, tier: &str, divisions: &[String], max_pages: i64, signal: &Signal) -> Result<Vec<LeagueEntry>> {
@@ -604,5 +724,27 @@ mod tests {
         assert!(!format!("{e:?}").contains("00000000"), "{e:?}");
         assert_eq!(budget_scope("eun1.api.riotgames.com"), "eun1");
         assert_eq!(budget_scope("asia.api.riotgames.com"), "ASIA");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_extra_key_is_set_aside_and_the_others_carry_on() {
+        let clock = clock();
+        let bad = "RGAPI-22222222-test";
+        let c = client(sim(&clock), clock.clone(), bad);
+        c.set_api_keys(&[bad.to_string(), KEY.to_string(), KEY.to_string(), " ".to_string()]);
+        assert_eq!(c.key_count(), 2, "repeats and blanks are skipped");
+        assert_eq!(c.parallelism(), 2);
+        let r = c.get_match("EUW1", "EUW1_1", &Signal::new()).await.unwrap();
+        assert!(r.is_some());
+        assert_eq!(c.transport().calls().iter().map(|x| x.status).collect::<Vec<_>>(), vec![401, 200]);
+        assert_eq!(c.key_count(), 1);
+        c.get_match("EUW1", "EUW1_2", &Signal::new()).await.unwrap();
+        assert_eq!(c.transport().calls().last().unwrap().status, 200, "the rejected key isn't tried again");
+        assert_eq!(c.budget_statuses().len(), 1);
+        // Every key rejected: the auth error, which never carries a key.
+        c.set_api_keys(&[bad.to_string()]);
+        let e = c.get_match("EUW1", "EUW1_3", &Signal::new()).await.unwrap_err();
+        assert!(e.downcast_ref::<RiotAuthError>().is_some());
+        assert!(!format!("{e:?}").contains("22222222"), "{e:?}");
     }
 }

@@ -641,6 +641,16 @@ impl RateLimiter {
         }
     }
 
+    /// How busy this limiter is for `family`: (requests queued or in flight, when the next one could start). The
+    /// client spreads requests over several keys by picking the least busy key's limiter for a host.
+    pub fn load(&self, family: &'static str) -> (usize, f64) {
+        let mut st = self.state.lock();
+        let now = self.now();
+        let busy = st.queue.len() + st.in_flight;
+        let at = st.earliest(family, now);
+        (busy, if at.is_finite() { at - now } else { f64::MAX })
+    }
+
     pub fn update_limits(&self, family: &'static str, app_header: Option<&str>, method_header: Option<&str>) {
         let changed = {
             let mut st = self.state.lock();

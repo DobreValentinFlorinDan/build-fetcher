@@ -35,8 +35,8 @@ impl RealStore {
     /// `settings_file` and `data_dir` are explicit so tests can point them at a temporary folder.
     pub fn new(settings_file: PathBuf, data_dir: PathBuf, logs_dir: PathBuf) -> Arc<RealStore> {
         let cfg = bf_core::config::config();
-        let key = bf_store::settings::api_key(&settings_file).unwrap_or_default();
-        let client = Arc::new(RiotClient::new(&key, cfg.rate_limits.clone(), cfg.pacing));
+        let client = Arc::new(RiotClient::new("", cfg.rate_limits.clone(), cfg.pacing));
+        client.set_api_keys(&bf_store::settings::all_keys(&settings_file));
         let (activity, _) = watch::channel(Activity::Idle);
         Arc::new(RealStore {
             settings_file,
@@ -127,12 +127,14 @@ impl RealStore {
         *f = Some(fetcher);
     }
 
-    /// A new key was stored: the client uses it at once, and fetching starts or resumes.
+    /// A key (main or extra) was stored or removed: the client uses the new list at once, and fetching starts or
+    /// resumes.
     fn key_changed(&self) {
-        let key = bf_store::settings::api_key(&self.settings_file).unwrap_or_default();
-        self.client.set_api_key(&key);
+        let keys = bf_store::settings::all_keys(&self.settings_file);
+        self.client.set_api_keys(&keys);
+        crate::bf_log!("[key] {} key(s) in use", keys.len());
         if let Some(f) = self.fetcher.lock().as_ref() {
-            f.set_key_present(!key.is_empty());
+            f.set_key_present(self.key_present());
         }
         self.maybe_start();
     }
@@ -347,6 +349,22 @@ impl KeyHandle for RealKeys {
 
     fn key_error(&self) -> Option<String> {
         self.store.fetch_status().key_error
+    }
+
+    fn extra_keys_masked(&self) -> Vec<String> {
+        bf_store::settings::extra_keys_masked(&self.settings_file)
+    }
+
+    fn add_extra_key(&self, key: &str) -> anyhow::Result<()> {
+        bf_store::settings::add_extra_key_at(&self.settings_file, key).map_err(|e| anyhow::anyhow!(crate::routes::scrub(&e.to_string())))?;
+        self.store.key_changed();
+        Ok(())
+    }
+
+    fn remove_extra_key(&self, index: usize) -> anyhow::Result<()> {
+        bf_store::settings::remove_extra_key_at(&self.settings_file, index)?;
+        self.store.key_changed();
+        Ok(())
     }
 }
 

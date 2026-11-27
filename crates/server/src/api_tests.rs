@@ -151,13 +151,40 @@ async fn build_for_any_champion_matches_the_contract() {
 }
 
 #[tokio::test]
+async fn extra_keys_are_added_listed_masked_and_removed() {
+    let t = harness(KeyOffer::Missing);
+    let (st, b) = call(&t.app, Method::POST, "/api/key", Some(json!({ "key": "RGAPI-00000000-0000-main" }))).await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    for k in ["RGAPI-11111111-1111-aaaa", "RGAPI-22222222-2222-bbbb"] {
+        let (st, b) = call(&t.app, Method::POST, "/api/key/extra", Some(json!({ "key": k }))).await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+    }
+    let (st, b) = call(&t.app, Method::POST, "/api/key/extra", Some(json!({ "key": "RGAPI-22222222-2222-bbbb" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "no repeats: {b}");
+    assert!(!b.contains("22222222"), "{b}");
+    let (st, b) = call(&t.app, Method::POST, "/api/key/extra", Some(json!({ "key": "not a key" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+    let v = get(&t.app, "/api/settings").await;
+    assert_eq!(v["key"]["extra"], json!(["RGAPI-…aaaa", "RGAPI-…bbbb"]));
+    assert_eq!(v["key"]["inUse"], 3);
+    assert!(!v.to_string().contains("11111111"), "keys are only ever shown masked");
+    let (st, b) = call(&t.app, Method::DELETE, "/api/key/extra/0", None).await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    let v: Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(v["extra"], json!(["RGAPI-…bbbb"]));
+    assert_eq!(v["inUse"], 2);
+    let (st, _) = call(&t.app, Method::DELETE, "/api/key/extra/7", None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn settings_round_trip_and_validation() {
     let t = harness(KeyOffer::Missing);
     let v = get(&t.app, "/api/settings").await;
     assert_eq!(keys_of(&v), vec!["settings", "key"]);
     let s: AppSettings = serde_json::from_value(v["settings"].clone()).unwrap();
     assert_eq!(s, AppSettings::default());
-    assert_eq!(keys_of(&v["key"]), vec!["masked", "set", "error", "ireliaOffer", "portal"]);
+    assert_eq!(keys_of(&v["key"]), vec!["masked", "set", "error", "ireliaOffer", "extra", "inUse", "portal"]);
 
     let patch = json!({ "regions": ["EUW1", "EUW1", "KR"], "rankFloor": "diamond", "diskBudgetBytes": 4_294_967_296u64, "tierA": [103, 103, 39], "gpu": false, "learning": false });
     let (st, b) = call(&t.app, Method::PATCH, "/api/settings", Some(patch)).await;

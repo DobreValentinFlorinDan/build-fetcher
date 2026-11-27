@@ -85,6 +85,27 @@ export type LiveAdvice = {
   notes: string[];
   /** Absent from servers before 1.2.0. */
   buys?: BuyNote[];
+  /** The build in buying order (1.5.0; absent from older servers). */
+  plan?: BuildPlan | null;
+};
+
+/** One next buy of the plan: its price from here, why it is here, other items for the slot. */
+export type PlanStep = {
+  item: number;
+  label: string;
+  buy: BuyNote;
+  why: string;
+  counter: boolean;
+  alternatives: number[];
+};
+
+export type BuildPlan = {
+  /** The starting items, in the first two minutes before anything is bought. */
+  start: RankedOption | null;
+  /** Completed items and boots owned. */
+  done: number[];
+  /** What is left, in buying order: the first is the next buy. */
+  steps: PlanStep[];
 };
 
 export type BudgetStatus = { scope: string; limits: string; used: number; ours: number; limit: number; windowS: number; shared: boolean };

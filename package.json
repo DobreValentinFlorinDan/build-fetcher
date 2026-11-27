@@ -1,7 +1,7 @@
 {
   "name": "build-fetcher",
   "productName": "Build Fetcher",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "League of Legends builds for any champion and role, learned on your PC from games fetched with your own Riot API key",
   "author": "Build Fetcher",
   "private": true,

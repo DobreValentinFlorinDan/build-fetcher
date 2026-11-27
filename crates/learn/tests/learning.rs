@@ -805,3 +805,82 @@ fn team_count_follows_fetching_before_the_first_model() {
     assert_eq!(l.status().team.unwrap().games, src.timeline_count().unwrap());
     assert!(l.status().team.unwrap().games > first);
 }
+
+/// 1.5.0: the plan lists the build in buying order and follows the game: starting items at the start, boots after
+/// the first item, owned items out, an answer to the enemy's damage moved in, each step priced in order.
+#[test]
+fn live_plan_orders_the_build_and_follows_the_game() {
+    let t = trained();
+    let rec = Recommender::new(t.src.clone(), Some(t.learner.clone()), data(), RecommendConfig::default());
+    let d = data();
+    let classes = bf_learn::features::ItemClasses::new(&d);
+    let excl = bf_core::engine::exclusivity::build_exclusivity_index(&d);
+    let show = |p: &BuildPlan| p.steps.iter().map(|s| format!("{} [{}] {}", s.label, s.buy.cost, s.why)).collect::<Vec<_>>();
+
+    // The first seconds: starting items, then six slots in order with boots second.
+    let fresh = LiveContext { draft: irelia_vs_darius(), game_time_s: 20.0, my_items: vec![3340], my_gold: 500.0, ..Default::default() };
+    let p = rec.live(&fresh).unwrap().plan.expect("a plan");
+    eprintln!("fresh: {:?} {:#?}", p.start.as_ref().map(|s| &s.label), show(&p));
+    assert!(p.start.is_some(), "starting items in the first seconds");
+    assert!(p.done.is_empty());
+    assert_eq!(p.steps.len(), 6, "{:#?}", show(&p));
+    assert!(classes.boots.contains(&p.steps[1].item), "boots after the first item: {:#?}", show(&p));
+    assert_eq!(p.steps.iter().filter(|s| classes.boots.contains(&s.item)).count(), 1);
+    for (k, s) in p.steps.iter().enumerate() {
+        let before: Vec<i64> = p.steps[..k].iter().map(|x| x.item).collect();
+        assert!(excl.blocker(&before, s.item).is_none(), "{} clashes with the steps before it", s.label);
+    }
+    // Priced in order: the 500 gold go to the first step only.
+    assert_eq!(p.steps[0].buy.short, p.steps[0].buy.cost.saturating_sub(500));
+    assert!(p.steps[1..].iter().all(|s| s.buy.short == s.buy.cost));
+
+    // Mid game, two items and boots built, a magic-heavy enemy: those leave the plan, magic resist comes next.
+    let owned = vec![TRINITY, 3074, 3047, 2003];
+    let mid = LiveContext {
+        draft: irelia_vs_darius(),
+        game_time_s: 1500.0,
+        my_items: owned.clone(),
+        enemy_items: vec![(134, vec![6655, 3089, 3020]), (117, vec![6617, 3158]), (60, vec![4645])],
+        my_gold: 1400.0,
+        ..Default::default()
+    };
+    let p = rec.live(&mid).unwrap().plan.unwrap();
+    eprintln!("mid: {:#?}", show(&p));
+    assert!(p.start.is_none());
+    assert_eq!(p.done, vec![TRINITY, 3074, 3047]);
+    assert_eq!(p.steps.len(), 3, "six slots: {:#?}", show(&p));
+    for s in &p.steps {
+        assert!(!owned.contains(&s.item) && excl.blocker(&owned, s.item).is_none(), "{}", s.label);
+        assert!(!classes.boots.contains(&s.item), "boots already built");
+    }
+    let first = d.item(p.steps[0].item).unwrap();
+    assert!(p.steps[0].counter && first.magic_resist > 0.0 && p.steps[0].why.contains("magic"), "{:#?}", show(&p));
+
+    // In lane: the lane opponent's own components count (Darius with two attack damage parts asks for armor).
+    let lane = LiveContext {
+        draft: irelia_vs_darius(),
+        game_time_s: 480.0,
+        my_items: vec![1055],
+        enemy_items: vec![(DARIUS, vec![1036, 3133]), (134, vec![1052, 1052]), (81, vec![1036])],
+        my_gold: 900.0,
+        ..Default::default()
+    };
+    let l = rec.live(&lane).unwrap().plan.unwrap();
+    eprintln!("lane: {:#?}", show(&l));
+    let armor = l.steps.iter().find(|s| s.why.starts_with("Lane opponent Darius")).unwrap_or_else(|| panic!("{:#?}", show(&l)));
+    assert!(armor.counter && d.item(armor.item).unwrap().armor > 0.0 && l.steps.iter().position(|s| s.item == armor.item).unwrap() <= 1);
+
+    // A component already bought pulls the item built from it to the front.
+    let comp = d.item(p.steps[2].item).unwrap().from.iter().copied().max_by(|a, b| d.item(*a).unwrap().gold_total.total_cmp(&d.item(*b).unwrap().gold_total)).unwrap();
+    let mut with_part = mid.clone();
+    with_part.my_items.push(comp);
+    let q = rec.live(&with_part).unwrap().plan.unwrap();
+    eprintln!("with {comp}: {:#?}", show(&q));
+    let part_gold = d.item(comp).unwrap().gold_total;
+    if part_gold >= 1000.0 || part_gold >= 0.4 * d.item(p.steps[2].item).unwrap().gold_total {
+        // The item built from it (another planned item may use the same part: the earliest of them leads).
+        let lead = d.item(q.steps[0].item).unwrap();
+        assert!(lead.from.contains(&comp) && q.steps[0].why.starts_with("Started"), "{:#?}", show(&q));
+        assert!(q.steps[0].buy.cost < lead.gold_total as u32, "the part counts as paid");
+    }
+}

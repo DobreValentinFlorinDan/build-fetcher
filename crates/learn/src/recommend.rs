@@ -137,6 +137,52 @@ pub struct Recommender {
     config: RecommendConfig,
 }
 
+/// What the plan reads beside the context.
+struct PlanInput<'a> {
+    start: &'a [RankedOption],
+    cores: &'a [RankedOption],
+    firsts: &'a [RankedOption],
+    /// Every open candidate, best first.
+    ranked: &'a [RankedOption],
+    counters: &'a [(RankedOption, String)],
+    wants: &'a [Want],
+    enemy: &'a [i64],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WantKind {
+    MagicResist,
+    Armor,
+    AntiHeal,
+    ArmorPen,
+    MagicPen,
+}
+
+impl WantKind {
+    fn fits(self, i: &bf_core::ddragon::ItemMeta) -> bool {
+        match self {
+            WantKind::MagicResist => i.magic_resist > 0.0,
+            WantKind::Armor => i.armor > 0.0,
+            WantKind::AntiHeal => i.anti_heal,
+            WantKind::ArmorPen => i.tags.iter().any(|t| t == "ArmorPenetration"),
+            WantKind::MagicPen => i.tags.iter().any(|t| t == "MagicPenetration"),
+        }
+    }
+}
+
+/// Something the enemy's items call for, and why. `lane`: it comes from the lane opponent alone.
+struct Want {
+    kind: WantKind,
+    reason: String,
+    lane: bool,
+}
+
+impl Want {
+    fn new(kind: WantKind, reason: String, lane: bool) -> Want {
+        Want { kind, reason, lane }
+    }
+}
+
 /// Order within a group of equally supported options (call after splitting thin from supported): supported ones by
 /// their estimate, then games; thin ones by games played.
 fn by_evidence(a: &(f64, RankedOption), b: &(f64, RankedOption)) -> std::cmp::Ordering {
@@ -806,6 +852,7 @@ impl Recommender {
             .collect();
         // As in champ select: items the data support in this role first, thin ones after.
         next.sort_by(|a, b| a.1.thin.cmp(&b.1.thin).then_with(|| by_evidence(a, b)).then(a.1.option.cmp(&b.1.option)));
+        let ranked_all: Vec<RankedOption> = next.iter().map(|x| x.1.clone()).collect();
         let mut next_buys: Vec<RankedOption> = next.into_iter().map(|x| x.1).take(self.config.per_section).collect();
         let magic_me = DamageProfile::magic_share_of(&self.data, d.champion).unwrap_or(0.5) >= 0.5;
         if next_buys.len() < 2 {
@@ -818,23 +865,49 @@ impl Recommender {
             }
         }
         // Counters to what the enemy builds.
-        let mut wants: Vec<(String, Box<dyn Fn(&bf_core::ddragon::ItemMeta) -> bool>)> = vec![];
+        let mut wants: Vec<Want> = vec![];
         if share >= 0.6 {
-            wants.push((format!("Enemy damage is mostly magic (about {:.0}%)", share * 100.0), Box::new(|i| i.magic_resist > 0.0)));
+            wants.push(Want::new(WantKind::MagicResist, format!("Enemy damage is mostly magic (about {:.0}%)", share * 100.0), false));
         } else if share <= 0.4 {
-            wants.push((format!("Enemy damage is mostly physical (about {:.0}%)", (1.0 - share) * 100.0), Box::new(|i| i.armor > 0.0)));
+            wants.push(Want::new(WantKind::Armor, format!("Enemy damage is mostly physical (about {:.0}%)", (1.0 - share) * 100.0), false));
         }
         if heal >= 2 {
-            wants.push((format!("Enemies build healing ({heal} items)"), Box::new(|i| i.anti_heal)));
+            wants.push(Want::new(WantKind::AntiHeal, format!("Enemies build healing ({heal} items)"), false));
         }
         if enemy_armor >= 150.0 && !magic_me {
-            wants.push((format!("Enemies stack armor ({enemy_armor:.0})"), Box::new(|i| i.tags.iter().any(|t| t == "ArmorPenetration"))));
+            wants.push(Want::new(WantKind::ArmorPen, format!("Enemies stack armor ({enemy_armor:.0})"), false));
         }
         if enemy_mr >= 150.0 && magic_me {
-            wants.push((format!("Enemies stack magic resist ({enemy_mr:.0})"), Box::new(|i| i.tags.iter().any(|t| t == "MagicPenetration"))));
+            wants.push(Want::new(WantKind::MagicPen, format!("Enemies stack magic resist ({enemy_mr:.0})"), false));
+        }
+        // 1.5.0: the lane opponent's own items, components included (in lane they are what the user fights).
+        if let Some(opp) = opponent {
+            let items: Vec<i64> = ctx.enemy_items.iter().filter(|e| e.0 == opp).flat_map(|e| e.1.iter().copied()).collect();
+            let name = self.champ_name(opp);
+            let (mut ap, mut ad, mut heals, mut armor) = (0usize, 0usize, 0usize, 0.0);
+            for it in items.iter().filter_map(|id| self.data.item(*id)).filter(|it| it.gold_total > 0.0) {
+                let has = |t: &str| it.tags.iter().any(|x| x == t);
+                ap += has("SpellDamage") as usize;
+                ad += (has("Damage") || has("CriticalStrike")) as usize;
+                heals += (self.classes.completed.contains(&it.id) && (has("LifeSteal") || has("SpellVamp"))) as usize;
+                armor += it.armor;
+            }
+            let have = |k: WantKind, w: &[Want]| w.iter().any(|x| x.kind == k);
+            if ad >= 2 && ap == 0 && !have(WantKind::Armor, &wants) {
+                wants.push(Want::new(WantKind::Armor, format!("Lane opponent {name} builds attack damage ({ad} items)"), true));
+            } else if ap >= 2 && ad == 0 && !have(WantKind::MagicResist, &wants) {
+                wants.push(Want::new(WantKind::MagicResist, format!("Lane opponent {name} builds ability power ({ap} items)"), true));
+            }
+            if heals >= 1 && !have(WantKind::AntiHeal, &wants) {
+                wants.push(Want::new(WantKind::AntiHeal, format!("Lane opponent {name} builds healing"), true));
+            }
+            if armor >= 80.0 && !magic_me && !have(WantKind::ArmorPen, &wants) {
+                wants.push(Want::new(WantKind::ArmorPen, format!("Lane opponent {name} stacks armor ({armor:.0})"), true));
+            }
         }
         let mut counters = vec![];
-        for (reason, want) in &wants {
+        for Want { reason, kind, .. } in &wants {
+            let want = |i: &bf_core::ddragon::ItemMeta| kind.fits(i);
             let mut pool: Vec<i64> = self.classes.completed.iter().copied().filter(|id| open(*id) && self.data.item(*id).map(|i| want(i)).unwrap_or(false)).collect();
             // Items this champion actually builds first, then ones that suit its damage type.
             let played = |id: &i64| cands.get(id).map(|c| c.0.lane.wg + c.0.champion.wg).unwrap_or(0.0);
@@ -859,7 +932,200 @@ impl Recommender {
                 buys.push(self.buy_note(id, &ctx.my_items, ctx.my_gold, &enemy));
             }
         }
-        Ok(LiveAdvice { next_buys, counters, predicted_win: now.map(|n| n.0), notes, buys })
+        let start = self.ranked_kind(&ev, OptionKind::StartingItems, opponent.is_some(), profile.is_some(), role_thin);
+        let cores = self.ranked_kind(&ev, OptionKind::CoreItems, opponent.is_some(), profile.is_some(), role_thin);
+        let firsts = self.ranked_kind(&ev, OptionKind::FirstItem, opponent.is_some(), profile.is_some(), role_thin);
+        let mut pool = ranked_all;
+        for o in &next_buys {
+            if !pool.iter().any(|p| p.option.item_ids()[0] == o.option.item_ids()[0]) {
+                pool.push(o.clone());
+            }
+        }
+        let plan = self.plan(ctx, &PlanInput { start: &start, cores: &cores, firsts: &firsts, ranked: &pool, counters: &counters, wants: &wants, enemy: &enemy }, &open);
+        Ok(LiveAdvice { next_buys, counters, predicted_win: now.map(|n| n.0), notes, buys, plan: Some(plan) })
+    }
+
+    /// A section's options in display order (as in champ select, by counts: supported ones by estimate, thin after).
+    fn ranked_kind(&self, ev: &Evidence, kind: OptionKind, has_opp: bool, has_profile: bool, role_thin: bool) -> Vec<RankedOption> {
+        let base = ev.base.get(&kind).copied().unwrap_or(0.5);
+        let mut v: Vec<(f64, RankedOption)> = ev
+            .by_kind
+            .get(&kind)
+            .into_iter()
+            .flatten()
+            .filter(|s| self.eligible(&s.option) && (s.lane.games > 0 || s.champion.games > 0))
+            .map(|s| {
+                let e = self.estimate(s, has_opp, has_profile, role_thin);
+                (e.wpa, self.ranked(s, &e, base, None, e.wpa))
+            })
+            .collect();
+        v.sort_by(|a, b| a.1.thin.cmp(&b.1.thin).then_with(|| by_evidence(a, b)).then(a.1.option.cmp(&b.1.option)));
+        v.into_iter().map(|x| x.1).collect()
+    }
+
+    /// The build in buying order from where the user stands (1.5.0). The completed items follow the best core path
+    /// that fits what is already built, then the best ranked items; boots come after the first item; an item that
+    /// answers what the enemy (or the lane opponent) builds is moved in as the 3rd item (the 2nd for the lane
+    /// opponent) unless the plan already has one; a component the user already owns pulls its item to the front.
+    /// Each step is priced in order against the user's gold, the components owned counted once.
+    fn plan(&self, ctx: &LiveContext, inp: &PlanInput, open: &dyn Fn(i64) -> bool) -> BuildPlan {
+        let owned = &ctx.my_items;
+        let is_boots = |id: &i64| self.classes.boots.contains(id);
+        let mut done: Vec<i64> = vec![];
+        for id in owned.iter().filter(|i| self.classes.is_build_item(**i)) {
+            if !done.contains(id) {
+                done.push(*id);
+            }
+        }
+        let built = done.iter().filter(|i| !is_boots(i)).count();
+        let has_boots = done.iter().any(is_boots);
+        let gold_of = |id: i64| self.data.item(id).map(|i| i.gold_total).unwrap_or(0.0);
+        // Starting items: only before anything is bought (trinkets cost nothing) and in the first two minutes.
+        let start = (ctx.game_time_s < 120.0 && owned.iter().all(|i| gold_of(*i) <= 0.0)).then(|| inp.start.first().cloned()).flatten();
+
+        struct Step {
+            item: i64,
+            why: String,
+            counter: bool,
+            alternatives: Vec<i64>,
+        }
+        let mut steps: Vec<Step> = vec![];
+        let fits = |id: i64, steps: &[Step]| -> bool {
+            let planned: Vec<i64> = steps.iter().map(|s| s.item).collect();
+            open(id) && self.excl.blocker(&planned, id).is_none()
+        };
+        // 1. The core path: the best ranked one that shares the most with the completed items owned.
+        let owned_core = |o: &RankedOption| o.option.item_ids().iter().filter(|i| done.contains(i)).count();
+        let core = inp
+            .cores
+            .iter()
+            .take(8)
+            .filter(|o| {
+                let rest: Vec<i64> = o.option.item_ids().into_iter().filter(|i| !done.contains(i)).collect();
+                rest.iter().enumerate().all(|(k, i)| open(*i) && self.excl.blocker(&rest[..k], *i).is_none())
+            })
+            .enumerate()
+            .max_by(|(ka, a), (kb, b)| owned_core(a).cmp(&owned_core(b)).then(kb.cmp(ka)))
+            .map(|x| x.1);
+        if let Some(c) = core {
+            for (k, id) in c.option.item_ids().into_iter().enumerate() {
+                if !done.contains(&id) && fits(id, &steps) {
+                    steps.push(Step { item: id, why: format!("Core item {} ({} games)", k + 1, c.games), counter: false, alternatives: vec![] });
+                }
+            }
+        } else if built == 0 {
+            if let Some(f) = inp.firsts.iter().find(|o| fits(o.option.item_ids()[0], &steps)) {
+                steps.push(Step { item: f.option.item_ids()[0], why: format!("First item ({} games)", f.games), counter: false, alternatives: vec![] });
+            }
+        }
+        // 2. Boots, chosen for what the enemy builds when this champion's games have such boots.
+        let boots: Vec<&RankedOption> = inp.ranked.iter().filter(|o| is_boots(&o.option.item_ids()[0]) && open(o.option.item_ids()[0])).collect();
+        let mut boots_step = None;
+        if !has_boots && !boots.is_empty() {
+            let pick = inp
+                .wants
+                .iter()
+                .find_map(|w| boots.iter().find(|o| o.games > 0 && self.data.item(o.option.item_ids()[0]).map(|i| w.kind.fits(i)).unwrap_or(false)).map(|o| (*o, Some(w))))
+                .unwrap_or((boots[0], None));
+            let why = match pick.1 {
+                Some(w) => w.reason.clone(),
+                None if pick.0.games > 0 => format!("Boots ({} games)", pick.0.games),
+                None => "Boots".to_string(),
+            };
+            let alternatives = boots.iter().map(|o| o.option.item_ids()[0]).filter(|i| *i != pick.0.option.item_ids()[0]).take(2).collect();
+            boots_step = Some(Step { item: pick.0.option.item_ids()[0], why, counter: pick.1.is_some(), alternatives });
+        }
+        let slots = (6 - usize::from(has_boots || boots_step.is_some())).saturating_sub(built);
+        // 3. Answers to the enemy's build, unless something built, planned or the boots already answer it.
+        let mut placed = 0;
+        for w in inp.wants {
+            let answered = |id: &i64| self.data.item(*id).map(|i| w.kind.fits(i)).unwrap_or(false);
+            if done.iter().any(answered) || steps.iter().take(slots).any(|s| answered(&s.item)) || boots_step.as_ref().map(|b| answered(&b.item)).unwrap_or(false) {
+                continue;
+            }
+            let Some((o, _)) = inp.counters.iter().find(|(o, r)| *r == w.reason && fits(o.option.item_ids()[0], &steps)) else { continue };
+            let at = if w.lane { 1 } else { 2 };
+            let at = (at as usize).saturating_sub(built).max(placed).min(steps.len());
+            let alternatives = inp.counters.iter().filter(|(x, r)| *r == w.reason && x.option != o.option).map(|(x, _)| x.option.item_ids()[0]).take(2).collect();
+            steps.insert(at, Step { item: o.option.item_ids()[0], why: w.reason.clone(), counter: true, alternatives });
+            placed = at + 1;
+        }
+        // 4. The rest from the ranked items (the model's order in tier A).
+        for o in inp.ranked {
+            if steps.len() >= slots {
+                break;
+            }
+            let id = o.option.item_ids()[0];
+            if is_boots(&id) || !self.classes.completed.contains(&id) || !fits(id, &steps) {
+                continue;
+            }
+            let why = if o.games > 0 { format!("Strong next item ({} games)", o.games) } else { "Suits the champion".to_string() };
+            steps.push(Step { item: id, why, counter: false, alternatives: vec![] });
+        }
+        steps.truncate(slots);
+        // 5. Components already bought. One that no planned item uses (worth 800+: a real commitment) brings in the
+        //    best ranked item built from it; one that pays for 40% of a planned item (or 1,000 gold) moves it first.
+        let parts: Vec<i64> = owned.iter().copied().filter(|i| !self.classes.is_build_item(*i) && gold_of(*i) > 0.0 && self.data.item(*i).map(|m| !m.into.is_empty()).unwrap_or(false)).collect();
+        for part in &parts {
+            if steps.iter().any(|s| self.recipe_contains(s.item, *part)) || gold_of(*part) < 800.0 {
+                continue;
+            }
+            let found = inp.ranked.iter().map(|o| o.option.item_ids()[0]).find(|id| self.classes.completed.contains(id) && self.recipe_contains(*id, *part) && fits(*id, &steps));
+            if let Some(id) = found {
+                if steps.len() >= slots && !steps.is_empty() {
+                    if let Some(k) = steps.iter().rposition(|s| !s.counter) {
+                        steps.remove(k);
+                    } else {
+                        continue;
+                    }
+                }
+                steps.insert(0, Step { item: id, why: format!("Builds from your {}", self.item_name(*part)), counter: false, alternatives: vec![] });
+            }
+        }
+        let progress = |id: i64| gold_of(id) - remaining_cost(&self.data, id, &mut parts.clone());
+        if let Some((k, p)) = steps.iter().enumerate().map(|(k, s)| (k, progress(s.item))).max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0))) {
+            if k > 0 && (p >= 1000.0 || p >= 0.4 * gold_of(steps[k].item)) {
+                let mut s = steps.remove(k);
+                if !s.why.starts_with("Builds from") {
+                    s.why = format!("Started: you own {:.0} gold of it · {}", p, s.why);
+                }
+                steps.insert(0, s);
+            }
+        }
+        // Boots after the first completed item (first if one is built already).
+        if let Some(b) = boots_step {
+            let at = if built == 0 { 1 } else { 0 }.min(steps.len());
+            steps.insert(at, b);
+        }
+        // 6. Alternatives for the item steps: ranked items the plan doesn't have that fit beside the rest.
+        let planned: Vec<i64> = steps.iter().map(|s| s.item).collect();
+        for k in 0..steps.len() {
+            if !steps[k].alternatives.is_empty() || is_boots(&steps[k].item) {
+                continue;
+            }
+            let others: Vec<i64> = planned.iter().copied().filter(|i| *i != steps[k].item).collect();
+            steps[k].alternatives = inp
+                .ranked
+                .iter()
+                .map(|o| o.option.item_ids()[0])
+                .filter(|id| self.classes.completed.contains(id) && !planned.contains(id) && open(*id) && self.excl.blocker(&others, *id).is_none())
+                .take(2)
+                .collect();
+        }
+        // Prices in order: each step uses the components still unused and the gold left after the steps before it.
+        let mut pool = owned.clone();
+        let mut gold = ctx.my_gold.max(0.0);
+        let steps = steps
+            .into_iter()
+            .map(|s| {
+                let buy = self.buy_note(s.item, &pool, gold, inp.enemy);
+                remaining_cost(&self.data, s.item, &mut pool);
+                gold = (gold - buy.cost as f64).max(0.0);
+                let option = if is_boots(&s.item) { BuildOption::boots(s.item) } else { BuildOption::late_item(s.item) };
+                PlanStep { item: s.item, label: self.label(&option), buy, why: s.why, counter: s.counter, alternatives: s.alternatives }
+            })
+            .collect();
+        BuildPlan { start, done, steps }
     }
 
     /// Gold still to pay for `id`, the most expensive affordable part of its recipe, and a reason from the enemy items.

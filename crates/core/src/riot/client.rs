@@ -219,9 +219,18 @@ impl<T: Transport> RiotClient<T> {
             .collect()
     }
 
-    /// One budget per (key in use, host).
+    /// One budget per (usable key, host): a key Riot rejected adds nothing to the budget (with every key rejected,
+    /// they are all shown).
     fn key_budget_statuses(&self) -> Vec<BudgetStatus> {
-        let keys: Vec<String> = self.keys.lock().iter().map(|k| k.key.clone()).collect();
+        let keys: Vec<String> = {
+            let slots = self.keys.lock();
+            let usable: Vec<String> = slots.iter().filter(|k| !k.rejected).map(|k| k.key.clone()).collect();
+            if usable.is_empty() {
+                slots.iter().map(|k| k.key.clone()).collect()
+            } else {
+                usable
+            }
+        };
         let limiters: Vec<Arc<RateLimiter>> = self.limiters.lock().iter().filter(|((k, _), _)| keys.contains(k)).map(|(_, l)| l.clone()).collect();
         limiters
             .iter()
@@ -741,6 +750,7 @@ mod tests {
         c.get_match("EUW1", "EUW1_2", &Signal::new()).await.unwrap();
         assert_eq!(c.transport().calls().last().unwrap().status, 200, "the rejected key isn't tried again");
         assert_eq!(c.budget_statuses().len(), 1);
+        assert!(!c.budget_statuses()[0].limits.contains("keys"), "a rejected key adds nothing to the budget: {}", c.budget_statuses()[0].limits);
         // Every key rejected: the auth error, which never carries a key.
         c.set_api_keys(&[bad.to_string()]);
         let e = c.get_match("EUW1", "EUW1_3", &Signal::new()).await.unwrap_err();

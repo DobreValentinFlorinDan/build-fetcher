@@ -223,6 +223,10 @@ pub struct FakeRiot {
     pub timelines: parking_lot::Mutex<std::collections::HashMap<String, Value>>,
     pub regions: parking_lot::Mutex<std::collections::HashMap<String, String>>,
     pub accounts: parking_lot::Mutex<std::collections::HashMap<String, String>>,
+    /// What `parallelism` answers (0 counts as 1): stands in for several API keys.
+    pub parallel: std::sync::atomic::AtomicUsize,
+    /// Match ids whose `get_match` fails (a server error that doesn't go away).
+    pub failing: parking_lot::Mutex<std::collections::HashSet<String>>,
 }
 
 impl FakeRiot {
@@ -258,6 +262,9 @@ impl FakeRiot {
 }
 
 impl crate::riot::client::RiotApi for FakeRiot {
+    fn parallelism(&self) -> usize {
+        self.parallel.load(std::sync::atomic::Ordering::SeqCst).max(1)
+    }
     async fn league_entries(&self, platform: &str, tier: &str, _d: &[String], _m: i64, _s: &crate::riot::rate_limiter::Signal) -> anyhow::Result<Vec<crate::riot::client::LeagueEntry>> {
         self.log("leagueEntries", vec![json!(platform), json!(tier)]);
         Ok(self.ladders.lock().get(&format!("{platform}:{tier}")).cloned().unwrap_or_default())
@@ -285,6 +292,9 @@ impl crate::riot::client::RiotApi for FakeRiot {
     }
     async fn get_match(&self, platform: &str, id: &str, _s: &crate::riot::rate_limiter::Signal) -> anyhow::Result<Option<Value>> {
         self.log("match", vec![json!(platform), json!(id)]);
+        if self.failing.lock().contains(id) {
+            anyhow::bail!("Riot API 500 on /lol/match/v5/matches/{id}");
+        }
         Ok(self.matches.lock().get(id).cloned())
     }
     async fn timeline(&self, platform: &str, id: &str, _s: &crate::riot::rate_limiter::Signal) -> anyhow::Result<Option<Value>> {

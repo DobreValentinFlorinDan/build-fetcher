@@ -56,8 +56,10 @@ export function ExtraKeysPanel({ view, onChange }: { view: KeyView; onChange: (k
           <button disabled={busy || !looksLikeKey(paste)} className="rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-bg disabled:opacity-40">Add</button>
           <button type="button" className="text-sm text-muted hover:text-fg" onClick={() => { setAdding(false); setPaste(''); setError(null); }}>Cancel</button>
         </form>
-      ) : (
+      ) : view.set ? (
         <button className="rounded-md border border-line px-3 py-1.5 text-sm text-fg" onClick={() => setAdding(true)}>Add Extra API Key</button>
+      ) : (
+        <p className="text-xs text-muted">Set the main key above first; extra keys add to its budget.</p>
       )}
       {error && <ErrorText>{error}</ErrorText>}
     </div>

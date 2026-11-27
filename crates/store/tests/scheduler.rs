@@ -181,6 +181,41 @@ async fn my_games_come_first_with_timelines_and_tier_a_games_get_theirs() {
     assert!(s.requests_last_hour > 0);
 }
 
+/// Several keys: games are fetched a few at a time. When one game of a batch fails, the others that arrived are
+/// still stored, so none of them is fetched again.
+#[tokio::test(start_paused = true)]
+async fn with_several_keys_a_failed_game_does_not_lose_the_rest_of_its_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = store(dir.path());
+    let games = synth(150);
+    let me = puuids(&games[0])[3].clone();
+    let fake = fake_world(&games);
+    fake.parallel.store(3, std::sync::atomic::Ordering::SeqCst);
+    let mine: Vec<String> = games.iter().filter(|g| puuids(g).contains(&me)).map(|g| g.id.clone()).collect();
+    assert!(mine.len() >= 3, "{} games of mine", mine.len());
+    // The user's newest game (the first of the first batch) fails every time.
+    let bad = games.iter().filter(|g| puuids(g).contains(&me)).max_by_key(|g| g.m["info"]["gameCreation"].as_i64().unwrap()).unwrap().id.clone();
+    fake.failing.lock().insert(bad.clone());
+    let f = Fetcher::with_clock(fake.clone(), st.clone(), settings(Some(&me)), FetcherConfig::default(), clock());
+    let (_tx, rx) = watch::channel(Activity::Idle);
+    let handles = f.spawn(rx);
+    tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+    f.stop();
+    for h in handles {
+        h.await.unwrap();
+    }
+    let fetched: Vec<String> = calls_of(&fake, "match").iter().map(|c| c[1].as_str().unwrap().to_string()).collect();
+    assert!(fetched.contains(&bad));
+    let good: Vec<&String> = fetched.iter().filter(|id| **id != bad).collect();
+    assert!(good.len() >= 2, "the failed game's batch-mates were fetched: {good:?}");
+    let unique: HashSet<&&String> = good.iter().collect();
+    assert_eq!(unique.len(), good.len(), "a game that arrived was fetched again");
+    for id in &good {
+        assert!(st.is_seen(id).unwrap(), "{id} arrived but wasn't stored");
+    }
+    assert!(!st.is_seen(&bad).unwrap());
+}
+
 #[tokio::test(start_paused = true)]
 async fn champ_select_and_games_pause_fetching_and_the_new_game_comes_first_after() {
     let dir = tempfile::tempdir().unwrap();

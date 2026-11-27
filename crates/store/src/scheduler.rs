@@ -557,13 +557,26 @@ impl<A: RiotApi + 'static> Fetcher<A> {
         for chunk in fresh.chunks(width) {
             signal.check()?;
             let fetched = futures_util::future::join_all(chunk.iter().map(|id| self.fetch_one(platform, id, rank, me, &tier_a, sample, signal))).await;
+            // Every game of the chunk that arrived is stored, even when another one failed (a stop, a rejected key):
+            // its requests are spent either way. The first failure is returned after.
+            let mut failed = None;
             for got in fetched {
-                let Some((m, timeline)) = got? else { continue };
+                let (m, timeline) = match got {
+                    Ok(Some(g)) => g,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        failed.get_or_insert(e);
+                        continue;
+                    }
+                };
                 let out = self.inner.store.ingest(&[Ingest { m: &m, timeline: timeline.as_ref(), rank, me }])?;
                 if matches!(out.first(), Some(Outcome::Counted { .. }) | Some(Outcome::Validation)) {
                     let now = self.now();
                     self.inner.st.lock().matches.push_back(now);
                 }
+            }
+            if let Some(e) = failed {
+                return Err(e);
             }
         }
         Ok(())

@@ -121,6 +121,25 @@ fn the_key_moves_only_when_asked() {
 }
 
 #[test]
+fn extra_keys_never_leave_this_pc() {
+    const EXTRA_A: &str = "RGAPI-11111111-aaaa";
+    const EXTRA_B: &str = "RGAPI-22222222-bbbb";
+    let a = pc(json!({ "riotApiKey": KEY_A, "riotExtraApiKeys": [EXTRA_A] }));
+    let store = filled(&a);
+    for include_key in [false, true] {
+        let zip = a.config.join(format!("extra-{include_key}.zip"));
+        export(&store, &a.settings, &a.data.join("checkpoints"), &zip, include_key).unwrap();
+        let raw = std::fs::read(&zip).unwrap();
+        assert!(!raw.windows(EXTRA_A.len()).any(|w| w == EXTRA_A.as_bytes()), "an extra key is in the archive (include_key {include_key})");
+        // Importing on a PC with its own extra keys keeps them.
+        let b = pc(json!({ "riotApiKey": KEY_B, "riotExtraApiKeys": [EXTRA_B] }));
+        stage_import(&zip, &b.config).unwrap();
+        apply_pending_import(&b.config, &b.data, &b.settings).unwrap().unwrap();
+        assert_eq!(settings_of(&b)["riotExtraApiKeys"], json!([EXTRA_B]));
+    }
+}
+
+#[test]
 fn an_import_can_be_cancelled_before_the_restart() {
     let a = pc(json!({}));
     let store = filled(&a);

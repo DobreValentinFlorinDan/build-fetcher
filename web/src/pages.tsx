@@ -3,21 +3,46 @@ import { useEffect, useState } from 'react';
 import { api, useGet } from './api.ts';
 import { BudgetMeter, BuildView, Card, ChampionIcon, ChampionPicker, ErrorText, RolePicker } from './components.tsx';
 import { useDd } from './ddragon.ts';
-import { ago, bytes, count, dataAge, ROLE_NAMES } from './format.ts';
+import { ago, bytes, count, dataAge, pickedRunePage, ROLE_NAMES, runePageKeys } from './format.ts';
 import type { BuildRecommendation, DraftState, ImportResult, ModelStatus, PairVolume, TeamProgress, Role, SettingsView, StorageStatus, Status } from './types.ts';
 
 // ---------------------------------------------------------------- import into the client
 
-export function ImportButton({ champion, role, clientConnected }: { champion: number; role: Role | null; clientConnected: boolean }) {
+/**
+ * The rune page for import on a shown build: `shown` is the page highlighted (the user's pick, else the best one) and
+ * `picked` the user's own pick, null until they click one. Without a pick the import works as before: the server
+ * imports the build's best page. A pick is kept while the build (it updates as picks come in) still lists it; a new
+ * champion or role starts over.
+ */
+export function useRunePick(rec: BuildRecommendation | null): { shown: string | null; picked: string | null; pick: (key: string | null) => void } {
+  const [picked, setPicked] = useState<string | null>(null);
+  useEffect(() => setPicked(null), [rec?.champion, rec?.role]);
+  const listed = rec != null && picked != null && runePageKeys(rec).includes(picked) ? picked : null;
+  return { shown: rec ? pickedRunePage(rec, listed) : null, picked: listed, pick: setPicked };
+}
+
+export function ImportButton({ champion, role, vs = null, runePage = null, runeLabel = null, onAuto, clientConnected }: {
+  champion: number;
+  role: Role | null;
+  /** The lane opponent the shown build is for (the Build page's "vs"). */
+  vs?: number | null;
+  /** The rune page the user picked (a RunePage key); none: the server imports the build's best page. */
+  runePage?: string | null;
+  /** Its name. */
+  runeLabel?: string | null;
+  /** Drops the pick: back to the automatic best page. */
+  onAuto?: () => void;
+  clientConnected: boolean;
+}) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => { setResult(null); setError(null); }, [champion, role]);
+  useEffect(() => { setResult(null); setError(null); }, [champion, role, runePage]);
   const run = async () => {
     setBusy(true);
     setError(null);
     try {
-      setResult(await api.post<ImportResult>('/api/import', { champion, role }));
+      setResult(await api.post<ImportResult>('/api/import', { champion, role, vs, runePage }));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -37,10 +62,21 @@ export function ImportButton({ champion, role, clientConnected }: { champion: nu
       >
         {busy ? 'Importing…' : 'Import runes and item set'}
       </button>
+      {runePage != null && (
+        <p className="text-xs text-muted">
+          Rune page you picked: <span className="text-fg">{runeLabel ?? runePage}</span>
+          {onAuto && <button className="ml-2 text-accent hover:underline" onClick={onAuto}>use the recommended one</button>}
+        </p>
+      )}
       {result && <ul className="text-xs">{part('Rune page', result.runePage)}{part(`Item set "${result.title}"`, result.itemSet)}</ul>}
       {error && <ErrorText>{error}</ErrorText>}
     </div>
   );
+}
+
+/** The picked page's name. */
+function pickedLabel(rec: BuildRecommendation, key: string | null): string | null {
+  return key == null ? null : rec.sections.find((s) => s.kind === 'runePage')?.options.find((o) => o.option.key === key)?.label ?? null;
 }
 
 // ---------------------------------------------------------------- Build
@@ -53,6 +89,7 @@ export function BuildPage({ status, initial }: { status: Status | null; initial?
   const [rec, setRec] = useState<BuildRecommendation | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const runes = useRunePick(rec);
   useEffect(() => {
     if (champion == null) return;
     let live = true;
@@ -85,9 +122,9 @@ export function BuildPage({ status, initial }: { status: Status | null; initial?
         <>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h1 className="flex items-center gap-3 text-xl font-semibold text-fg"><ChampionIcon id={rec.champion} size={40} />{dd.championName(rec.champion)} <span className="text-muted">{ROLE_NAMES[rec.role]}</span></h1>
-            <ImportButton champion={rec.champion} role={rec.role} clientConnected={status?.lcu.status === 'connected'} />
+            <ImportButton champion={rec.champion} role={rec.role} vs={vs} runePage={runes.picked} runeLabel={pickedLabel(rec, runes.picked)} onAuto={() => runes.pick(null)} clientConnected={status?.lcu.status === 'connected'} />
           </div>
-          <BuildView rec={rec} />
+          <BuildView rec={rec} runePage={runes.shown} onRunePage={runes.pick} />
         </>
       )}
     </div>
@@ -98,6 +135,7 @@ export function BuildPage({ status, initial }: { status: Status | null; initial?
 
 export function ChampSelectPage({ draft, status }: { draft: DraftState | null; status: Status | null }) {
   const dd = useDd();
+  const runes = useRunePick(draft?.recommendation ?? null);
   if (!draft) {
     return (
       <Card title="Champ select">
@@ -142,9 +180,9 @@ export function ChampSelectPage({ draft, status }: { draft: DraftState | null; s
               {dd.championName(draft.recommendation.champion)} <span className="text-muted">{ROLE_NAMES[draft.recommendation.role]}</span>
               {draft.pending && <span className="text-xs font-normal text-muted">updating…</span>}
             </h1>
-            <ImportButton champion={draft.recommendation.champion} role={draft.recommendation.role} clientConnected={status?.lcu.status === 'connected'} />
+            <ImportButton champion={draft.recommendation.champion} role={draft.recommendation.role} runePage={runes.picked} runeLabel={pickedLabel(draft.recommendation, runes.picked)} onAuto={() => runes.pick(null)} clientConnected={status?.lcu.status === 'connected'} />
           </div>
-          <BuildView rec={draft.recommendation} />
+          <BuildView rec={draft.recommendation} runePage={runes.shown} onRunePage={runes.pick} />
         </>
       )}
     </div>

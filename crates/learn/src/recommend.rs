@@ -175,6 +175,56 @@ fn page_parts(key: &str) -> Option<(i64, i64)> {
     Some((keystone, sub))
 }
 
+/// The options the model scores (indices into `stats`, most played first): the `n` most played and, for rune pages,
+/// the most played page of up to `n` more keystones, so a page from another tree can be shown and picked.
+fn candidates(stats: &[Stats], kind: OptionKind, n: usize) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..stats.len().min(n)).collect();
+    if kind == OptionKind::RunePage {
+        let keystone = |i: usize| page_parts(&stats[i].option.key).map(|p| p.0);
+        let mut seen: Vec<Option<i64>> = idx.iter().map(|&i| keystone(i)).collect();
+        let mut extra = 0;
+        for i in idx.len()..stats.len() {
+            if extra == n {
+                break;
+            }
+            if !seen.contains(&keystone(i)) {
+                seen.push(keystone(i));
+                idx.push(i);
+                extra += 1;
+            }
+        }
+    }
+    idx
+}
+
+/// Rune pages (ranked best first) reordered: the best page of each keystone, keystones in `keystones` order (the
+/// keystone section's ranking) and then any others in page order, at most `per_section` of them; then the rest of
+/// the pages in their order. The top page keeps the top keystone, and a few variants of one keystone never push the
+/// other trees out of the list.
+fn keystone_spread(pages: Vec<RankedOption>, keystones: &[i64], per_section: usize) -> Vec<RankedOption> {
+    let keystone = |o: &RankedOption| page_parts(&o.option.key).map(|p| p.0);
+    let mut order: Vec<Option<i64>> = keystones.iter().map(|k| Some(*k)).collect();
+    for p in &pages {
+        if !order.contains(&keystone(p)) {
+            order.push(keystone(p));
+        }
+    }
+    let mut taken = vec![false; pages.len()];
+    let mut out = Vec::with_capacity(pages.len());
+    for k in order {
+        if out.len() == per_section {
+            break;
+        }
+        if let Some(i) = pages.iter().position(|p| keystone(p) == k) {
+            taken[i] = true;
+            out.push(i);
+        }
+    }
+    out.extend((0..pages.len()).filter(|i| !taken[*i]));
+    let mut pages: Vec<Option<RankedOption>> = pages.into_iter().map(Some).collect();
+    out.into_iter().filter_map(|i| pages[i].take()).collect()
+}
+
 impl Recommender {
     /// `learner`: None for counts only (tier B everywhere).
     pub fn new(source: Arc<dyn DataSource>, learner: Option<Arc<Learner>>, data: Arc<StaticData>, config: RecommendConfig) -> Recommender {
@@ -533,11 +583,16 @@ impl Recommender {
     }
 
     /// Makes sections agree: the core build starts with the first item shown first where it can, late items repeat
-    /// neither the core build nor its exclusivity groups, rune pages with the top keystone come first.
+    /// neither the core build nor its exclusivity groups, rune pages lead with the best page of each keystone in the
+    /// keystone section's order (so the top page has the top keystone, and other trees are always there to pick).
     fn reconcile(&self, sections: &mut [Section]) {
         let top = |sections: &[Section], k: OptionKind| sections.iter().find(|s| s.kind == k).and_then(|s| s.options.first().map(|o| o.option.clone()));
         let first = top(sections, OptionKind::FirstItem);
-        let keystone = top(sections, OptionKind::Keystone);
+        let keystones: Vec<i64> = sections
+            .iter()
+            .find(|s| s.kind == OptionKind::Keystone)
+            .map(|s| s.options.iter().filter_map(|o| o.option.key.parse().ok()).collect())
+            .unwrap_or_default();
         for s in sections.iter_mut() {
             match s.kind {
                 OptionKind::CoreItems => {
@@ -545,11 +600,7 @@ impl Recommender {
                         s.options.sort_by_key(|o| o.option.item_ids().first() != Some(&f));
                     }
                 }
-                OptionKind::RunePage => {
-                    if let Some(k) = keystone.as_ref().and_then(|k| k.key.parse::<i64>().ok()) {
-                        s.options.sort_by_key(|o| page_parts(&o.option.key).map(|p| p.0) != Some(k));
-                    }
-                }
+                OptionKind::RunePage => s.options = keystone_spread(std::mem::take(&mut s.options), &keystones, self.config.per_section),
                 _ => {}
             }
         }
@@ -558,7 +609,8 @@ impl Recommender {
             if s.kind == OptionKind::LateItem {
                 s.options.retain(|o| o.option.item_ids().iter().all(|i| !core.contains(i) && self.excl.blocker(&core, *i).is_none()));
             }
-            s.options.truncate(self.config.per_section);
+            // Rune pages: the best page of each keystone, then more pages (see keystone_spread).
+            s.options.truncate(if s.kind == OptionKind::RunePage { 2 * self.config.per_section } else { self.config.per_section });
         }
     }
 
@@ -605,12 +657,12 @@ impl Recommender {
             let mut options: Vec<(f64, RankedOption)> = vec![];
             let model = served.as_ref().filter(|_| MODEL_KINDS.contains(&kind) && !stats.is_empty());
             if let Some(sv) = model {
-                let n = stats.len().min(self.config.candidates);
-                let opts: Vec<BuildOption> = stats[..n].iter().map(|s| s.option.clone()).collect();
+                let idx = candidates(&stats, kind, self.config.candidates);
+                let opts: Vec<BuildOption> = idx.iter().map(|&i| stats[i].option.clone()).collect();
                 let (scores, base_p) = self.model_scores(sv, &contexts, &opts, &pages);
-                for i in 0..n {
-                    let wpa = scores[i] - base_p;
-                    options.push((wpa, self.ranked(&stats[i], &est[i], base, Some(scores[i]), wpa)));
+                for (j, &i) in idx.iter().enumerate() {
+                    let wpa = scores[j] - base_p;
+                    options.push((wpa, self.ranked(&stats[i], &est[i], base, Some(scores[j]), wpa)));
                 }
             } else {
                 for (s, e) in stats.iter().zip(&est) {
@@ -999,5 +1051,34 @@ mod tests {
     fn page_keys_parse() {
         let k = BuildOption::rune_page(8000, &[8010, 9111, 9104, 8299], 8400, &[8444, 8473], &[5008, 5008, 5011]).key;
         assert_eq!(page_parts(&k), Some((8010, 8400)));
+    }
+
+    fn page(keystone: i64, minor: i64) -> RankedOption {
+        let option = BuildOption::rune_page(8000, &[keystone, 9111, 9104, minor], 8400, &[8444, 8473], &[5008, 5008, 5011]);
+        RankedOption { option, label: String::new(), games: 100, wins: 50, weighted_games: 100.0, win_rate: 0.5, wpa: 0.0, predicted_win: None, basis: Basis::Lane, thin: false }
+    }
+    fn keystones_of(pages: &[RankedOption]) -> Vec<i64> {
+        pages.iter().map(|p| page_parts(&p.option.key).unwrap().0).collect()
+    }
+
+    /// Six Conqueror variants rank above every Lethal Tempo and Fleet page: the list still leads with the best page of
+    /// each keystone (the keystone section's order), then the remaining variants in their order.
+    #[test]
+    fn rune_pages_keep_every_keystone() {
+        let mut pages: Vec<RankedOption> = (0..6).map(|i| page(8010, 8299 + i)).collect();
+        pages.push(page(8021, 8299));
+        pages.push(page(8008, 8299));
+        pages.push(page(8008, 8014));
+        let spread = keystone_spread(pages.clone(), &[8010, 8008, 8021], 5);
+        assert_eq!(keystones_of(&spread), vec![8010, 8008, 8021, 8010, 8010, 8010, 8010, 8010, 8008]);
+        assert_eq!(spread[0].option, pages[0].option, "the top page stays first");
+        assert_eq!(spread[1].option, pages[7].option, "a keystone's best page, not its later variant");
+        assert_eq!(spread.len(), pages.len(), "nothing dropped");
+        // A keystone missing from the keystone section still gets its best page, after the ranked ones.
+        let spread = keystone_spread(pages.clone(), &[8008], 5);
+        assert_eq!(keystones_of(&spread)[..3], [8008, 8010, 8021]);
+        // At most `per_section` keystones lead.
+        let spread = keystone_spread(pages, &[8010, 8008, 8021], 2);
+        assert_eq!(keystones_of(&spread)[..3], [8010, 8008, 8010]);
     }
 }

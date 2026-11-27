@@ -120,6 +120,8 @@ export type FetchStatus = {
   dropped: [string, number][];
   current: string | null;
   keyError: string | null;
+  /** Off-meta champion-roles the fetcher doesn't hunt ("Olaf UTILITY"), rarest first. */
+  skippedPairs?: string[];
 };
 
 export type StorageStatus = {

@@ -59,6 +59,7 @@ impl StoreHandle for FakeStore {
             dropped: vec![("remake".into(), 41), ("leaver".into(), 17), ("roles".into(), 9), ("duplicate".into(), 220)],
             current: Some("tier A champions".into()),
             key_error: None,
+            skipped_pairs: vec!["Olaf UTILITY".into(), "Teemo JUNGLE".into()],
         }
     }
     fn storage_status(&self) -> StorageStatus {

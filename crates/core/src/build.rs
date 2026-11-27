@@ -748,6 +748,9 @@ pub struct FetchStatus {
     /// The work item being done now ("my games", "tier A: Ahri MIDDLE", "thin: Ivern JUNGLE").
     pub current: Option<String>,
     pub key_error: Option<String>,
+    /// Off-meta champion-roles the fetcher doesn't hunt ("Olaf UTILITY"), rarest first.
+    #[serde(default)]
+    pub skipped_pairs: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]

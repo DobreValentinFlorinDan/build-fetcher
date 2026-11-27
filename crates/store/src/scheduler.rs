@@ -11,7 +11,10 @@
 //! 3. thin champion-role pairs on the newest patch (fewest games first): their Master+ players; and once Master+
 //!    sourcing has had a fair run on the patch (`widen_after_games` Master+ games) a pair still under half the thin
 //!    threshold at Master+ is widened: its Diamond players, else Diamond players in general (the Diamond ladder),
-//!    which is how the pair's Diamond players are found;
+//!    which is how the pair's Diamond players are found. Off-meta pairs (a pick rate under `min_pick_rate`, such as
+//!    Olaf support) are never hunted: their games still count when they turn up, and a pair comes back on its own
+//!    once its pick rate rises (judged on the newest patch once it has `judge_after_games` games, before that on the
+//!    patch before). Tier A champions are never skipped;
 //! 4. popular pairs: any Master+ player of the pool not checked lately (every game feeds every pair);
 //! 5. a pool refresh (league-v4) when a pool is empty or a day old.
 //!
@@ -53,6 +56,10 @@ pub struct FetcherConfig {
     pub thin_pairs: usize,
     /// Master+ games on the newest patch before thin pairs are widened to Diamond.
     pub widen_after_games: u32,
+    /// A pair picked in fewer than this share of games (pair games / games, as sites show pick rates) is off-meta.
+    pub min_pick_rate: f64,
+    /// Games a patch needs before its own pick rates are trusted (before that the previous patch's are used).
+    pub judge_after_games: u32,
     /// Wait when there is nothing to do, and after an error.
     pub idle_ms: u64,
     pub error_backoff_ms: u64,
@@ -71,6 +78,8 @@ impl Default for FetcherConfig {
             tier_a_patch_games: 3,
             thin_pairs: 40,
             widen_after_games: 2000,
+            min_pick_rate: 0.005,
+            judge_after_games: 500,
             idle_ms: 60_000,
             error_backoff_ms: 5_000,
         }
@@ -101,6 +110,8 @@ struct State {
     last_my_games: i64,
     me: Option<String>,
     running: usize,
+    /// The off-meta pairs skipped by the last plan ("Olaf UTILITY"), rarest first.
+    skipped: Vec<String>,
 }
 
 struct Inner<A: RiotApi> {
@@ -260,6 +271,7 @@ impl<A: RiotApi + 'static> Fetcher<A> {
             dropped: self.inner.store.drops(),
             current: (!current.is_empty()).then(|| current.join("; ")),
             key_error: st.key_error.clone(),
+            skipped_pairs: st.skipped.clone(),
         }
     }
 
@@ -330,9 +342,10 @@ impl<A: RiotApi + 'static> Fetcher<A> {
         let diamond_floor = s.rank_floor == RankBand::Diamond;
         let bands: Vec<RankBand> = if diamond_floor { vec![RankBand::MasterPlus, RankBand::Diamond] } else { vec![RankBand::MasterPlus] };
         // 2. Tier A.
-        let mut tier_a: Vec<i64> = self.tier_a()?.into_iter().collect();
-        tier_a.sort();
-        for c in tier_a {
+        let tier_a = self.tier_a()?;
+        let mut tier_a_list: Vec<i64> = tier_a.iter().copied().collect();
+        tier_a_list.sort();
+        for &c in &tier_a_list {
             for role in self.tier_a_roles(c)? {
                 for band in &bands {
                     if let Some((puuid, platform)) = store.players_for(c, role, *band, &platforms, due, 1)?.into_iter().next() {
@@ -344,7 +357,14 @@ impl<A: RiotApi + 'static> Fetcher<A> {
         // 3. Thin pairs on the newest patch.
         if let Some(patch) = store.current_patch()? {
             let mut vols = store.volumes(&[patch])?;
-            vols.retain(|v| v.games < store.opts.thin_games);
+            let off_meta = self.off_meta(patch, &vols, &tier_a)?;
+            {
+                let mut skipped: Vec<_> = off_meta.iter().map(|(c, r, rate)| (*rate, format!("{} {}", name(*c), r.as_riot()))).collect();
+                skipped.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+                self.inner.st.lock().skipped = skipped.into_iter().map(|x| x.1).collect();
+            }
+            let off: HashSet<(i64, Role)> = off_meta.iter().map(|x| (x.0, x.1)).collect();
+            vols.retain(|v| v.games < store.opts.thin_games && !off.contains(&(v.champion, v.role)));
             vols.sort_by_key(|v| (v.games, v.champion, v.role));
             let master_games = store.patch_games(patch, RankBand::MasterPlus)?;
             let may_widen = s.widen_to_diamond && master_games >= cfg.widen_after_games;
@@ -378,6 +398,39 @@ impl<A: RiotApi + 'static> Fetcher<A> {
             return Ok(w);
         }
         Ok(Work::Idle)
+    }
+
+    /// Off-meta pairs on `patch` (`vols` are its volumes): (champion, role, pick rate) of each pair picked in fewer
+    /// than `min_pick_rate` of the games. Judged on `patch` once it has `judge_after_games` games, else on the patch
+    /// before when that one has them, else not at all (too early to tell). Tier A champions are never off-meta.
+    fn off_meta(&self, patch: bf_core::build::Patch, vols: &[bf_core::build::PairVolume], tier_a: &HashSet<i64>) -> Result<Vec<(i64, Role, f64)>> {
+        use bf_core::build::DataSource;
+        let cfg = &self.inner.cfg;
+        // Each game counts ten player rows.
+        let games_of = |v: &[bf_core::build::PairVolume]| v.iter().map(|x| x.games as u64).sum::<u64>() / 10;
+        let mut judged: Vec<bf_core::build::PairVolume> = vols.to_vec();
+        if games_of(&judged) < cfg.judge_after_games as u64 {
+            let all = self.inner.store.volumes(&[])?;
+            let previous = all.iter().map(|v| v.patch).filter(|p| *p < patch).max();
+            judged = match previous {
+                Some(prev) => all.into_iter().filter(|v| v.patch == prev).collect(),
+                None => return Ok(vec![]),
+            };
+            if games_of(&judged) < cfg.judge_after_games as u64 {
+                return Ok(vec![]);
+            }
+        }
+        let total = games_of(&judged).max(1) as f64;
+        let rate: HashMap<(i64, Role), f64> = judged.iter().map(|v| ((v.champion, v.role), v.games as f64 / total)).collect();
+        // Every pair of the newest patch is judged; one the judged patch never saw has a pick rate of 0.
+        let mut out: Vec<(i64, Role, f64)> = vols
+            .iter()
+            .filter(|v| !tier_a.contains(&v.champion))
+            .map(|v| (v.champion, v.role, rate.get(&(v.champion, v.role)).copied().unwrap_or(0.0)))
+            .filter(|x| x.2 < cfg.min_pick_rate)
+            .collect();
+        out.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
+        Ok(out)
     }
 
     /// A player of a ladder to check, or the ladder's refresh when it is empty or old.

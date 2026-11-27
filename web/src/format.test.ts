@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ago, bytes, dataAge, goldLine, looksLikeKey, meter, optionParts, parseRunePage, pct, pts } from './format.ts';
+import { ago, bytes, dataAge, goldLine, keystoneOf, looksLikeKey, meter, optionParts, pageForKeystone, parseRunePage, pct, pickedRunePage, pts } from './format.ts';
+import type { BuildRecommendation, RankedOption } from './types.ts';
 
 test('numbers', () => {
   assert.equal(pct(0.5351), '53.5%');
@@ -52,4 +53,28 @@ test('gold line: buy now, or what is missing and the part to buy now', () => {
   assert.equal(goldLine({ cost: 3000, short: 0, part: null, partCost: null }, name), 'Buy now (3000)');
   assert.equal(goldLine({ cost: 2900, short: 650, part: 1026, partCost: 850 }, name), '650 short · Blasting Wand now (850)');
   assert.equal(goldLine({ cost: 2900, short: 2800, part: null, partCost: null }, name), '2800 short');
+});
+
+test('picking the rune page to import', () => {
+  const opt = (kind: 'runePage' | 'keystone', key: string): RankedOption =>
+    ({ option: { kind, key }, label: '', games: 100, wins: 50, weightedGames: 100, winRate: 0.5, wpa: 0, predictedWin: null, basis: 'lane', thin: false });
+  const conq = '8000:8010,9111,9104,8299/8400:8444,8473/5008,5008,5011';
+  const conq2 = '8000:8010,9111,9105,8299/8400:8444,8473/5008,5008,5011';
+  const grasp = '8400:8437,8446,8444,8451/8000:9111,9105/5008,5008,5011';
+  const rec = {
+    champion: 266, role: 'TOP', patch: null, tier: 'b', laneOpponent: null, enemyProfile: null, games: 500, model: null, notes: [],
+    sections: [
+      { kind: 'keystone', options: [opt('keystone', '8010'), opt('keystone', '8437')] },
+      { kind: 'runePage', options: [opt('runePage', conq), opt('runePage', grasp), opt('runePage', conq2)] },
+    ],
+  } satisfies BuildRecommendation;
+  assert.equal(pickedRunePage(rec, null), conq, 'nothing picked: the best page');
+  assert.equal(pickedRunePage(rec, grasp), grasp);
+  assert.equal(pickedRunePage(rec, '8100:8112,8139,8140,8135/8300:8304,8347/5008,5008,5001'), conq, 'a page no longer listed falls back to the best');
+  assert.equal(keystoneOf(grasp), 8437);
+  assert.equal(keystoneOf(null), null);
+  assert.equal(pageForKeystone(rec, 8437), grasp);
+  assert.equal(pageForKeystone(rec, 8010), conq, "the keystone's best page");
+  assert.equal(pageForKeystone(rec, 8128), null);
+  assert.equal(pickedRunePage({ ...rec, sections: [] }, grasp), null);
 });

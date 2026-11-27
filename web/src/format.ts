@@ -1,5 +1,5 @@
 // Pure formatting and parsing for the dashboard (unit-tested in format.test.ts, no DOM).
-import type { BudgetStatus, BuildOption, OptionKind, PairVolume, Role } from './types.ts';
+import type { BudgetStatus, BuildOption, BuildRecommendation, OptionKind, PairVolume, Role } from './types.ts';
 
 export function pct(x: number | null | undefined, digits = 1): string {
   if (x == null || !Number.isFinite(x)) return '–';
@@ -110,6 +110,29 @@ export function optionParts(o: BuildOption): OptionParts {
     default:
       return { kind: 'text', text: o.key };
   }
+}
+
+// ---------------------------------------------------------------- picking the rune page to import
+
+/** The build's rune page keys, best first. */
+export function runePageKeys(rec: BuildRecommendation): string[] {
+  return rec.sections.find((s) => s.kind === 'runePage')?.options.map((o) => o.option.key) ?? [];
+}
+
+/** The rune page to import: the one the user picked while the build still lists it, else the best one. */
+export function pickedRunePage(rec: BuildRecommendation, picked: string | null): string | null {
+  const keys = runePageKeys(rec);
+  return picked != null && keys.includes(picked) ? picked : keys[0] ?? null;
+}
+
+/** A page's keystone. */
+export function keystoneOf(key: string | null): number | null {
+  return key == null ? null : parseRunePage(key)?.perks[0] ?? null;
+}
+
+/** The best listed page with this keystone (picking a keystone picks it). */
+export function pageForKeystone(rec: BuildRecommendation, keystone: number): string | null {
+  return runePageKeys(rec).find((k) => keystoneOf(k) === keystone) ?? null;
 }
 
 /** Stat shards aren't in Data Dragon's runesReforged. */

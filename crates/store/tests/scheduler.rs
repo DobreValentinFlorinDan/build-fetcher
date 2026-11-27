@@ -392,3 +392,60 @@ async fn the_user_pauses_and_resumes_fetching() {
         h.await.unwrap();
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn off_meta_pairs_are_not_hunted_until_their_pick_rate_rises() {
+    use bf_core::build::DataSource;
+    let dir = tempfile::tempdir().unwrap();
+    let st = store(dir.path());
+    let games = synth(60);
+    for g in &games {
+        st.ingest(&[Ingest { m: &g.m, timeline: None, rank: RankBand::MasterPlus, me: None }]).unwrap();
+    }
+    let patch = st.current_patch().unwrap().unwrap();
+    let vols = st.volumes(&[patch]).unwrap();
+    // The rarest pair that isn't Irelia (tier A) and its pick rate.
+    let total = vols.iter().map(|v| v.games as f64).sum::<f64>() / 10.0;
+    let rare = vols.iter().filter(|v| v.champion != IRELIA).min_by_key(|v| (v.games, v.champion, v.role)).unwrap().clone();
+    let rare_rate = rare.games as f64 / total;
+    let now = base_ms();
+    // Plans until only the ladder is left (each player marked checked as it comes up): the labels, then what was skipped.
+    let thin_labels = |cfg: FetcherConfig| -> Vec<String> {
+        let f = Fetcher::with_clock(Arc::new(FakeRiot::default()), st.clone(), settings(None), cfg, clock());
+        let mut out = vec![];
+        for _ in 0..600 {
+            match f.plan(Routing::Europe, now).unwrap() {
+                Work::Player { puuid, platform, rank, label } => {
+                    st.mark_checked(&puuid, platform, rank, now).unwrap();
+                    out.push(label);
+                }
+                _ => break,
+            }
+        }
+        // Undo: everyone due again for the next run.
+        for g in &games {
+            for p in puuids(g) {
+                st.mark_checked(&p, Platform::Euw1, RankBand::MasterPlus, 0).unwrap();
+            }
+        }
+        out.push(format!("skipped: {}", f.status().skipped_pairs.join(", ")));
+        out
+    };
+    let data = load_test_static_data();
+    let rare_label = format!("thin: {} {}", data.champion(rare.champion).unwrap().name, rare.role.as_riot());
+    // Too few games on the patch to judge: every thin pair is hunted, the rare one too.
+    let early = thin_labels(FetcherConfig { min_pick_rate: rare_rate * 1.01, judge_after_games: 1000, ..Default::default() });
+    assert!(early.contains(&rare_label), "{early:?}");
+    assert_eq!(early.last().unwrap(), "skipped: ");
+    // Enough games: the rare pair is off-meta and skipped, and the dashboard says so.
+    let judged = thin_labels(FetcherConfig { min_pick_rate: rare_rate * 1.01, judge_after_games: 50, ..Default::default() });
+    assert!(!judged.contains(&rare_label), "{judged:?}");
+    assert!(judged.iter().any(|l| l.starts_with("thin: ")), "other pairs are still hunted");
+    let skipped = judged.last().unwrap();
+    assert!(skipped.contains(&rare_label["thin: ".len()..]), "{skipped}");
+    // Irelia is tier A: never skipped, however rare.
+    assert!(!skipped.contains("Irelia"), "{skipped}");
+    // Its pick rate rises above the bar (here: the bar drops under it): hunted again.
+    let back = thin_labels(FetcherConfig { min_pick_rate: rare_rate * 0.99, judge_after_games: 50, ..Default::default() });
+    assert!(back.contains(&rare_label), "{back:?}");
+}

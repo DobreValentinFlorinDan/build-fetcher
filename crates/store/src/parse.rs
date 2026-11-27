@@ -440,12 +440,15 @@ fn expected_area(role: Role) -> Area {
     }
 }
 
-/// Each player in their role's area for at least half of minutes 2-10 (base time aside).
+/// Catches a `teamPosition` that is plainly wrong (a role swap), from where each player spent minutes 2-10 (base time
+/// aside): a top, mid or bot laner must be in their own lane at least half the time; a jungler or a support must not
+/// spend more than half of it in one lane that isn't theirs. Junglers gank and clear camps by the lanes, and supports
+/// ward the river and roam, so asking them to stay "in their area" dropped most games with a timeline.
 fn check_roles(r: &MatchRecord, positions: &[Vec<(u16, f64, f64)>]) -> Result<(), Rejected> {
     for (k, p) in r.players.iter().enumerate() {
         let Some(role) = p.role else { continue };
         let want = expected_area(role);
-        let (mut considered, mut matched) = (0, 0);
+        let (mut considered, mut in_area) = (0u32, [0u32; 5]);
         for (minute, x, y) in positions.get(k).map(|v| v.as_slice()).unwrap_or(&[]) {
             if !(2..=10).contains(minute) {
                 continue;
@@ -455,11 +458,18 @@ fn check_roles(r: &MatchRecord, positions: &[Vec<(u16, f64, f64)>]) -> Result<()
                 continue;
             }
             considered += 1;
-            matched += (a == want) as u32;
+            in_area[a as usize] += 1;
         }
         // Too few points to judge (a player in base all along is caught as a leaver): no verdict.
-        if considered >= 3 && matched * 2 < considered {
-            return reject(Drop::Roles, format!("{} on team {} spent {matched} of {considered} early minutes in their lane", role.as_riot(), p.team));
+        if considered < 3 {
+            continue;
+        }
+        let wrong = match role {
+            Role::Top | Role::Middle | Role::Bottom => in_area[want as usize] * 2 < considered,
+            Role::Jungle | Role::Utility => [Area::Top, Area::Middle, Area::Bottom].into_iter().filter(|a| *a != want).any(|a| in_area[a as usize] * 2 > considered),
+        };
+        if wrong {
+            return reject(Drop::Roles, format!("{} on team {} spent {} of {considered} early minutes in their area", role.as_riot(), p.team, in_area[want as usize]));
         }
     }
     Ok(())
@@ -565,6 +575,30 @@ mod tests {
         let m = make_match(&MatchSpec::id("EUW1_1"));
         let tl = make_timeline(&m, &TimelineSpec { spots: vec![(2, (7400.0, 7400.0))], ..Default::default() });
         assert_eq!(why(&m, Some(&tl)), Drop::Roles);
+        // A support on the mid lane all early game is a swap too.
+        let tl = make_timeline(&m, &TimelineSpec { spots: vec![(5, (7400.0, 7400.0))], ..Default::default() });
+        assert_eq!(why(&m, Some(&tl)), Drop::Roles);
+        // A jungler who clears camps and ganks (gromp counts as top, raptors as mid, then bot) and a support who wards
+        // the river and roams mid: neither spends most of the early game in a lane that isn't theirs, so the game stays.
+        let r = ok(&m, None).record;
+        let lane = |p: &PlayerRecord| -> (f64, f64) {
+            match p.role.unwrap() {
+                Role::Top => (1500.0, 9000.0),
+                Role::Jungle => (4000.0, 8000.0),
+                Role::Middle => (7400.0, 7400.0),
+                Role::Bottom | Role::Utility => (9000.0, 1500.0),
+            }
+        };
+        let mut pos: Vec<Vec<(u16, f64, f64)>> = r.players.iter().map(|p| (2..=10).map(|m| (m, lane(p).0, lane(p).1)).collect()).collect();
+        let jungler = r.players.iter().position(|p| p.role == Some(Role::Jungle)).unwrap();
+        let support = r.players.iter().position(|p| p.role == Some(Role::Utility)).unwrap();
+        pos[jungler] = [(2100.0, 8400.0), (4000.0, 8000.0), (7000.0, 5400.0), (7400.0, 7400.0), (1500.0, 9000.0), (4000.0, 6500.0), (9000.0, 1500.0), (7800.0, 4000.0), (2100.0, 8400.0)].iter().zip(2u16..).map(|(xy, m)| (m, xy.0, xy.1)).collect();
+        pos[support] = [(9000.0, 1500.0), (10200.0, 3000.0), (9500.0, 4500.0), (7400.0, 7400.0), (9000.0, 1500.0), (6000.0, 6500.0), (9000.0, 1500.0), (10200.0, 3000.0), (9000.0, 1500.0)].iter().zip(2u16..).map(|(xy, m)| (m, xy.0, xy.1)).collect();
+        assert!(check_roles(&r, &pos).is_ok());
+        // The same mid laner roaming that much is still dropped: laners must be in lane half the time.
+        let mid = r.players.iter().position(|p| p.role == Some(Role::Middle)).unwrap();
+        pos[mid] = pos[support].clone();
+        assert_eq!(check_roles(&r, &pos).unwrap_err().reason, Drop::Roles);
         assert_eq!(area(1500.0, 12500.0), Area::Top);
         assert_eq!(area(4000.0, 8000.0), Area::Jungle);
         assert_eq!(area(7400.0, 7400.0), Area::Middle);

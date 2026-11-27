@@ -244,6 +244,15 @@ export function FetchingPage({ status }: { status: Status | null }) {
               {f.budgets.map((b) => <BudgetMeter key={b.scope} b={b} />)}
               <p className="text-[11px] text-muted"><span className="inline-block h-2 w-2 rounded-sm bg-accent" /> Build Fetcher <span className="ml-3 inline-block h-2 w-2 rounded-sm bg-warn" /> another app on the same key. Requests that would exceed Riot's count are never sent.</p>
             </div>
+            {(f.skippedPairs?.length ?? 0) > 0 && (
+              <div>
+                <h3 className="mb-1 text-xs uppercase tracking-wider text-muted">Off-meta picks not hunted: {count(f.skippedPairs!.length)}</h3>
+                <p className="text-sm text-muted" title={f.skippedPairs!.join(', ')}>
+                  {f.skippedPairs!.slice(0, 8).join(', ')}{f.skippedPairs!.length > 8 ? ', …' : ''}
+                </p>
+                <p className="text-[11px] text-muted">Picked in under 0.5% of games, so no requests go to finding their players. Their games still count when they turn up, and a pick comes back here on its own once more people play it. Your tier A champions are never skipped.</p>
+              </div>
+            )}
             {f.dropped.length > 0 && (
               <div>
                 <h3 className="mb-1 text-xs uppercase tracking-wider text-muted">Games and answers dropped</h3>

@@ -42,10 +42,14 @@ pub fn parse_rune_page(key: &str) -> Option<(i64, i64, Vec<i64>)> {
     Some((style.parse().ok()?, sub.parse().ok()?, [perks, sub_perks, shards].concat()))
 }
 
-/// The best rune page of the build, as the client's POST /lol-perks/v1/pages takes it.
-pub fn rune_page_body(build: &BuildRecommendation) -> Option<Value> {
-    let best = options(build, OptionKind::RunePage).first()?;
-    let (primary, sub, perks) = parse_rune_page(&best.option.key)?;
+/// The rune page to import, as the client's POST /lol-perks/v1/pages takes it: the page the user picked (a RunePage
+/// key), else the build's best.
+pub fn rune_page_body(build: &BuildRecommendation, chosen: Option<&str>) -> Option<Value> {
+    let key = match chosen {
+        Some(k) => k,
+        None => options(build, OptionKind::RunePage).first()?.option.key.as_str(),
+    };
+    let (primary, sub, perks) = parse_rune_page(key)?;
     Some(json!({ "name": PAGE_NAME, "primaryStyleId": primary, "subStyleId": sub, "selectedPerkIds": perks, "current": true }))
 }
 
@@ -130,8 +134,8 @@ pub struct ImportResult {
     pub owned: Owned,
 }
 
-async fn import_runes(api: &dyn LcuApi, build: &BuildRecommendation, saved: Option<i64>) -> anyhow::Result<(PartResult, Option<i64>)> {
-    let Some(body) = rune_page_body(build) else { return Ok((PartResult::failed("This build has no complete rune page yet."), None)) };
+async fn import_runes(api: &dyn LcuApi, build: &BuildRecommendation, chosen: Option<&str>, saved: Option<i64>) -> anyhow::Result<(PartResult, Option<i64>)> {
+    let Some(body) = rune_page_body(build, chosen) else { return Ok((PartResult::failed("This build has no complete rune page yet."), None)) };
     let pages = api.send("GET", "/lol-perks/v1/pages", None).await?;
     let pages: Vec<Value> = pages.as_array().cloned().unwrap_or_default();
     let editable: Vec<&Value> = pages.iter().filter(|p| p["isEditable"] != false && p["isDeletable"] != false).collect();
@@ -189,10 +193,11 @@ async fn import_items(api: &dyn LcuApi, build: &BuildRecommendation, title: &str
     Ok((PartResult { ok: true, error: None, replaced }, set["uid"].as_str().map(String::from)))
 }
 
-/// Each part succeeds or fails on its own, with the reason.
-pub async fn import_build(api: &dyn LcuApi, build: &BuildRecommendation, champion_name: &str, owned: &Owned) -> ImportResult {
+/// Each part succeeds or fails on its own, with the reason. `rune_page` is the page the user picked (a RunePage key);
+/// without one the build's best page goes in.
+pub async fn import_build(api: &dyn LcuApi, build: &BuildRecommendation, rune_page: Option<&str>, champion_name: &str, owned: &Owned) -> ImportResult {
     let title = set_title(champion_name, build.role);
-    let (rune_page, page_id) = import_runes(api, build, owned.rune_page_id).await.unwrap_or_else(|e| (PartResult::failed(e), None));
+    let (rune_page, page_id) = import_runes(api, build, rune_page, owned.rune_page_id).await.unwrap_or_else(|e| (PartResult::failed(e), None));
     let (item_set, uid) = import_items(api, build, &title, owned.item_set_uid.as_deref()).await.unwrap_or_else(|e| (PartResult::failed(e), None));
     let owned = Owned { rune_page_id: page_id.or(owned.rune_page_id), item_set_uid: uid.or_else(|| owned.item_set_uid.clone()) };
     ImportResult { rune_page, item_set, title, owned }
@@ -307,7 +312,7 @@ pub(crate) mod tests {
     #[test]
     fn bodies_for_any_champion() {
         let b = build(103, Role::Middle);
-        let page = rune_page_body(&b).unwrap();
+        let page = rune_page_body(&b, None).unwrap();
         assert_eq!(page["primaryStyleId"], json!(8100));
         assert_eq!(page["subStyleId"], json!(8300));
         assert_eq!(page["selectedPerkIds"], json!([8112, 8139, 8140, 8135, 8304, 8347, 5008, 5008, 5001]));
@@ -322,6 +327,11 @@ pub(crate) mod tests {
         assert_eq!(block_ids(&set["blocks"][3]), vec!["4645", "3157"], "the core's first item isn't repeated");
         assert!(parse_rune_page("8000:1,2,3/8400:4,5/6,7,8").is_none(), "three primary runes");
         assert!(parse_rune_page("x").is_none());
+        // The page the user picked goes in instead of the best one.
+        let picked = rune_page_body(&b, Some("8000:8010,9111,9104,8299/8400:8444,8473/5008,5008,5011")).unwrap();
+        assert_eq!(picked["primaryStyleId"], json!(8000));
+        assert_eq!(picked["selectedPerkIds"], json!([8010, 9111, 9104, 8299, 8444, 8473, 5008, 5008, 5011]));
+        assert!(rune_page_body(&b, Some("8000:8010")).is_none());
     }
 
     #[test]
@@ -333,7 +343,7 @@ pub(crate) mod tests {
         let stub = crate::fakes::StubBuildSource { data: slot };
         for c in data.champions.values() {
             let rec = stub.recommend(&DraftContext { champion: c.id, ..Default::default() }).unwrap();
-            let page = rune_page_body(&rec).unwrap_or_else(|| panic!("{} has no page", c.name));
+            let page = rune_page_body(&rec, None).unwrap_or_else(|| panic!("{} has no page", c.name));
             for id in page["selectedPerkIds"].as_array().unwrap().iter().take(6) {
                 assert!(data.rune_ids.contains(&id.as_i64().unwrap()), "{}: rune {id} not in Data Dragon", c.name);
             }
@@ -350,7 +360,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn first_import_keeps_the_users_pages_and_sets() {
         let f = fake(vec![json!({ "id": 1, "name": "My page" }), json!({ "id": 2, "name": "Default", "isEditable": false })], 5, vec![json!({ "uid": "mine", "title": "My set" })]);
-        let r = import_build(&f, &build(266, Role::Top), "Aatrox", &Owned::default()).await;
+        let r = import_build(&f, &build(266, Role::Top), None, "Aatrox", &Owned::default()).await;
         assert!(r.rune_page.ok && !r.rune_page.replaced);
         assert!(r.item_set.ok && !r.item_set.replaced);
         assert_eq!(r.title, "Build Fetcher · Aatrox Top");
@@ -369,7 +379,7 @@ pub(crate) mod tests {
             vec![json!({ "uid": "mine", "title": "My set" }), json!({ "uid": "old", "title": "Build Fetcher · Ahri Mid" })],
         );
         let owned = Owned { rune_page_id: Some(77), item_set_uid: Some("old".into()) };
-        let r = import_build(&f, &build(222, Role::Bottom), "Jinx", &owned).await;
+        let r = import_build(&f, &build(222, Role::Bottom), None, "Jinx", &owned).await;
         assert!(r.rune_page.replaced && r.item_set.replaced);
         assert_eq!(names(&f), vec!["My page", PAGE_NAME]);
         assert_ne!(f.pages.lock()[1]["id"], json!(77));
@@ -380,7 +390,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn no_free_rune_page_touches_none() {
         let f = fake(vec![json!({ "id": 1, "name": "A" }), json!({ "id": 2, "name": "B" })], 2, vec![]);
-        let r = import_build(&f, &build(12, Role::Utility), "Alistar", &Owned::default()).await;
+        let r = import_build(&f, &build(12, Role::Utility), None, "Alistar", &Owned::default()).await;
         assert!(!r.rune_page.ok);
         assert!(r.rune_page.error.as_deref().unwrap().contains("No free rune page (2 of 2 in use)"));
         assert!(r.item_set.ok);
@@ -392,7 +402,7 @@ pub(crate) mod tests {
     async fn a_client_error_on_one_part_leaves_the_other() {
         let mut f = fake(vec![], 5, vec![]);
         f.fail_items = true;
-        let r = import_build(&f, &build(64, Role::Jungle), "Lee Sin", &Owned { rune_page_id: None, item_set_uid: Some("keep".into()) }).await;
+        let r = import_build(&f, &build(64, Role::Jungle), None, "Lee Sin", &Owned { rune_page_id: None, item_set_uid: Some("keep".into()) }).await;
         assert!(r.rune_page.ok);
         assert!(!r.item_set.ok);
         assert_eq!(r.owned.item_set_uid.as_deref(), Some("keep"));

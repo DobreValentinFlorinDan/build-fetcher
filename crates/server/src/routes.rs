@@ -4,6 +4,7 @@
 
 use crate::app::App;
 use crate::handles::{KeyOffer, SettingsPatch};
+use crate::lcu::importer::parse_rune_page;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, Request, State};
 use axum::http::{header, StatusCode};
@@ -275,9 +276,14 @@ async fn live(State(app): State<Arc<App>>) -> R {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ImportBody {
     champion: i64,
     role: Option<String>,
+    /// The lane opponent the Build page shows.
+    vs: Option<i64>,
+    /// The rune page the user picked (a RunePage key, `style:perks/substyle:perks/shards`); none: the best one.
+    rune_page: Option<String>,
 }
 
 async fn import(State(app): State<Arc<App>>, Json(b): Json<ImportBody>) -> Result<R, ApiError> {
@@ -285,7 +291,17 @@ async fn import(State(app): State<Arc<App>>, Json(b): Json<ImportBody>) -> Resul
         return Err(ApiError::bad("Pick a champion"));
     }
     let role = parse_role(b.role.as_deref())?;
-    let r = app.import(b.champion, role).await.map_err(|e| ApiError::conflict(format!("{e:#}")))?;
+    let rune_page = b.rune_page.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+    if let Some(k) = &rune_page {
+        let (style, sub, perks) = parse_rune_page(k).ok_or_else(|| ApiError::bad("That rune page is not complete"))?;
+        if let Some(d) = app.static_data() {
+            // Trees and the six runes (shards are not in Data Dragon's rune list).
+            if let Some(id) = [style, sub].iter().chain(&perks[..6]).find(|id| !d.rune_ids.contains(id)) {
+                return Err(ApiError::bad(format!("Unknown rune {id}")));
+            }
+        }
+    }
+    let r = app.import(b.champion, role, b.vs.filter(|v| *v > 0), rune_page).await.map_err(|e| ApiError::conflict(format!("{e:#}")))?;
     Ok(ok(r))
 }
 

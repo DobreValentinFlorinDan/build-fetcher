@@ -408,6 +408,16 @@ async fn import_through_the_route_for_any_champion() {
     assert_eq!((v["runePage"]["replaced"].clone(), v["itemSet"]["replaced"].clone()), (json!(true), json!(true)));
     assert_eq!(fake.pages.lock().len(), 1);
     assert_eq!(fake.sets.lock()["itemSets"].as_array().unwrap().len(), 1);
+    // The page the user picked goes in, as picked; an incomplete page or an unknown rune is refused.
+    let picked = "8000:8010,9111,9104,8299/8400:8444,8473/5008,5008,5011";
+    let (s, b) = call(&t.app, Method::POST, "/api/import", Some(json!({ "champion": 266, "vs": 122, "runePage": picked }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(fake.pages.lock()[0]["selectedPerkIds"], json!([8010, 9111, 9104, 8299, 8444, 8473, 5008, 5008, 5011]));
+    let (s, _) = call(&t.app, Method::POST, "/api/import", Some(json!({ "champion": 266, "runePage": "8000:8010/8400:8444" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, b) = call(&t.app, Method::POST, "/api/import", Some(json!({ "champion": 266, "runePage": "8000:1,9111,9104,8299/8400:8444,8473/5008,5008,5011" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    assert!(b.contains("Unknown rune 1"), "{b}");
 }
 
 #[tokio::test]

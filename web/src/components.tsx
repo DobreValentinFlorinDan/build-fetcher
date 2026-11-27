@@ -1,7 +1,7 @@
 // Shared pieces: icons, a build's sections with their evidence, the champion picker, cards and meters.
 import { useMemo, useState, type ReactNode } from 'react';
 import { useDd } from './ddragon.ts';
-import { count, KIND_ORDER, KIND_TITLES, meter, optionParts, pct, pts, ROLE_NAMES } from './format.ts';
+import { count, KIND_ORDER, KIND_TITLES, keystoneOf, meter, optionParts, pageForKeystone, pct, pts, ROLE_NAMES } from './format.ts';
 import type { BudgetStatus, BuildRecommendation, RankedOption, Role, Section } from './types.ts';
 import { ROLES } from './types.ts';
 
@@ -104,34 +104,83 @@ export function Evidence({ o, compact = false }: { o: RankedOption; compact?: bo
   );
 }
 
-export function SectionView({ s, limit = 4 }: { s: Section; limit?: number }) {
+/**
+ * One section of the build, best first. With `onPick` its rows can be picked (the rune page to import, or a keystone
+ * that picks its best page): the picked row is highlighted, else the first.
+ */
+export function SectionView({ s, limit = 4, picked, onPick }: { s: Section; limit?: number; picked?: string | null; onPick?: (o: RankedOption) => void }) {
   const [all, setAll] = useState(false);
-  const shown = all ? s.options : s.options.slice(0, limit);
+  const pickedAt = picked == null ? -1 : s.options.findIndex((o) => o.option.key === picked);
+  // A picked row past the limit stays in view.
+  const shown = all ? s.options : s.options.slice(0, Math.max(limit, pickedAt + 1));
+  const highlighted = onPick ? pickedAt : 0;
   return (
-    <Card title={KIND_TITLES[s.kind]} right={s.options.length > limit && <button className="text-xs text-accent hover:underline" onClick={() => setAll(!all)}>{all ? 'Fewer' : `All ${s.options.length}`}</button>}>
+    <Card
+      title={KIND_TITLES[s.kind]}
+      right={
+        <span className="flex items-center gap-3">
+          {onPick && s.options.length > 1 && <span className="text-[11px] text-muted">click one to import it instead</span>}
+          {s.options.length > limit && <button className="text-xs text-accent hover:underline" onClick={() => setAll(!all)}>{all ? 'Fewer' : `All ${s.options.length}`}</button>}
+        </span>
+      }
+    >
       {s.options.length === 0 ? (
         <p className="text-sm text-muted">No games yet.</p>
       ) : (
         <ol className="space-y-2">
-          {shown.map((o, i) => (
-            <li key={o.option.key} className={`flex flex-col gap-1 rounded-md px-2 py-2 ${i === 0 ? 'bg-raised' : ''}`}>
-              <div className="flex items-center gap-3">
-                <span className="w-4 text-xs text-muted">{i + 1}</span>
-                <OptionIcons o={o} />
-                <span className="truncate text-sm text-fg" title={o.label}>{o.label}</span>
-              </div>
-              <div className="pl-7"><Evidence o={o} /></div>
-            </li>
-          ))}
+          {shown.map((o, i) => {
+            const body = (
+              <>
+                <div className="flex items-center gap-3">
+                  <span className="w-4 text-xs text-muted">{i + 1}</span>
+                  <OptionIcons o={o} />
+                  <span className="truncate text-sm text-fg" title={o.label}>{o.label}</span>
+                  {onPick && i === highlighted && <span className="ml-auto shrink-0 text-[11px] text-accent">will import</span>}
+                </div>
+                <div className="pl-7"><Evidence o={o} /></div>
+              </>
+            );
+            const base = `flex w-full flex-col gap-1 rounded-md px-2 py-2 text-left ${i === highlighted ? 'bg-raised' : ''}`;
+            return (
+              <li key={o.option.key}>
+                {onPick ? (
+                  <button type="button" aria-pressed={i === highlighted} onClick={() => onPick(o)} className={`${base} ${i === highlighted ? 'ring-1 ring-accent' : 'hover:bg-raised/60'}`}>
+                    {body}
+                  </button>
+                ) : (
+                  <div className={base}>{body}</div>
+                )}
+              </li>
+            );
+          })}
         </ol>
       )}
     </Card>
   );
 }
 
-export function BuildView({ rec }: { rec: BuildRecommendation }) {
+/**
+ * A build, every section with its evidence. With `onRunePage` the rune page to import can be picked: a rune page row
+ * picks that page, a keystone row picks that keystone's best listed page.
+ */
+export function BuildView({ rec, runePage, onRunePage }: { rec: BuildRecommendation; runePage?: string | null; onRunePage?: (key: string) => void }) {
   const dd = useDd();
   const sections = [...rec.sections].sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
+  const pick = (s: Section): Pick<Parameters<typeof SectionView>[0], 'picked' | 'onPick'> => {
+    if (!onRunePage) return {};
+    if (s.kind === 'runePage') return { picked: runePage ?? null, onPick: (o) => onRunePage(o.option.key) };
+    if (s.kind === 'keystone') {
+      const k = keystoneOf(runePage ?? null);
+      return {
+        picked: k == null ? null : String(k),
+        onPick: (o) => {
+          const page = pageForKeystone(rec, Number(o.option.key));
+          if (page) onRunePage(page);
+        },
+      };
+    }
+    return {};
+  };
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted">
@@ -148,7 +197,7 @@ export function BuildView({ rec }: { rec: BuildRecommendation }) {
         </ul>
       )}
       <div className="grid gap-4 lg:grid-cols-2">
-        {sections.map((s) => <SectionView key={s.kind} s={s} />)}
+        {sections.map((s) => <SectionView key={s.kind} s={s} {...pick(s)} />)}
       </div>
     </div>
   );

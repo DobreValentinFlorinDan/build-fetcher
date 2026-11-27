@@ -314,8 +314,9 @@ impl App {
     }
 
     /// The build for a champion (and role) imported into the client: the draft's own context when the champion is the
-    /// one in champ select, so the import matches what is shown.
-    pub async fn import(&self, champion: i64, role: Option<Role>) -> anyhow::Result<ImportResult> {
+    /// one in champ select, else the lane opponent `vs` the Build page shows, so the import matches what is shown.
+    /// `rune_page` is the page the user picked (a RunePage key, checked by the route); without one the best goes in.
+    pub async fn import(&self, champion: i64, role: Option<Role>, vs: Option<i64>, rune_page: Option<String>) -> anyhow::Result<ImportResult> {
         let api = self.lcu_api.read().clone().ok_or_else(|| anyhow::anyhow!("The League client is not connected."))?;
         let ctx = self
             .draft
@@ -327,10 +328,10 @@ impl App {
                 d.role = role.or(d.role);
                 d
             })
-            .unwrap_or(DraftContext { champion, role, patch: self.patch(), ..Default::default() });
+            .unwrap_or_else(|| DraftContext { champion, role, enemies: vs.map(|v| vec![(v, role)]).unwrap_or_default(), patch: self.patch(), ..Default::default() });
         let rec = self.recommend(ctx).await?;
         let owned = self.owned.lock().clone();
-        let r = import_build(&*api, &rec, &self.champion_name(champion), &owned).await;
+        let r = import_build(&*api, &rec, rune_page.as_deref(), &self.champion_name(champion), &owned).await;
         *self.owned.lock() = r.owned.clone();
         crate::bf_log!("[import] {}: rune page {}, item set {}", r.title, ok_str(r.rune_page.ok), ok_str(r.item_set.ok));
         Ok(r)

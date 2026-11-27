@@ -446,6 +446,32 @@ impl BuildSource for StubBuildSource {
                 BuyNote { item: id, cost, short: cost.saturating_sub(gold), part: None, part_cost: None, reason: None }
             })
             .collect();
-        Ok(LiveAdvice { next_buys, counters, predicted_win: None, notes: vec![STUB_NOTE.into()], buys })
+        // 1.5.0: the plan in buying order: the kit's first item, its first boots, then its late items, minus what is owned.
+        let price = |id: i64| self.data.read().as_ref().and_then(|d| d.item(id).map(|i| i.gold_total as u32)).unwrap_or(3000);
+        let worth = |id: &i64| self.data.read().as_ref().and_then(|d| d.item(*id).map(|i| i.gold_total)).unwrap_or(0.0);
+        let start = (ctx.game_time_s < 120.0 && ctx.my_items.iter().all(|i| worth(i) <= 0.0))
+            .then(|| BuildOption::starting_items(k.start[0]).map(|o| self.option(o, "Starting items".into(), 400, 0)))
+            .flatten();
+        let has_boots = k.boots.iter().any(|b| owned(*b));
+        let done: Vec<i64> = ctx.my_items.iter().copied().filter(|i| k.first.contains(i) || k.late.contains(i) || k.boots.contains(i)).collect();
+        let mut order: Vec<(i64, &str)> = vec![];
+        for id in k.first.iter().take(1).chain(if has_boots { [].iter() } else { k.boots[..1].iter() }).chain(k.first.iter().skip(1)).chain(k.late.iter()) {
+            if !owned(*id) && !order.iter().any(|o| o.0 == *id) {
+                order.push((*id, if k.boots.contains(id) { "Boots" } else { "Most built next" }));
+            }
+        }
+        order.truncate(6usize.saturating_sub(done.len()));
+        let mut left = gold;
+        let steps = order
+            .into_iter()
+            .map(|(id, why)| {
+                let cost = price(id);
+                let buy = BuyNote { item: id, cost, short: cost.saturating_sub(left), part: None, part_cost: None, reason: None };
+                left = left.saturating_sub(cost);
+                PlanStep { item: id, label: self.item_name(id), buy, why: why.into(), counter: false, alternatives: vec![] }
+            })
+            .collect();
+        let plan = Some(BuildPlan { start, done, steps });
+        Ok(LiveAdvice { next_buys, counters, predicted_win: None, notes: vec![STUB_NOTE.into()], buys, plan })
     }
 }

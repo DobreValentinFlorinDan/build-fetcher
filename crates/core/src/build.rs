@@ -645,6 +645,38 @@ pub struct LiveAdvice {
     /// fits this game.
     #[serde(default)]
     pub buys: Vec<BuyNote>,
+    /// 1.5.0: the build in buying order from where the user stands: the starting items while the game is young, the
+    /// items already built, then each next buy until the build is full. Recomputed with every update, so it follows
+    /// the user's gold, the components they already bought, and the enemy's (and the lane opponent's) items.
+    #[serde(default)]
+    pub plan: Option<BuildPlan>,
+}
+
+/// The build in buying order (1.5.0).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildPlan {
+    /// The starting items, while the game is in its first two minutes and none of them is bought yet.
+    pub start: Option<RankedOption>,
+    /// Completed items and boots already owned, in inventory order.
+    pub done: Vec<i64>,
+    /// What is left to buy, in order: the first step is the next buy. At most enough to fill six slots.
+    pub steps: Vec<PlanStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanStep {
+    pub item: i64,
+    pub label: String,
+    /// Its price from here: components already owned count as paid; the gold missing; the part to buy now.
+    pub buy: BuyNote,
+    /// Why it is here, and here in the order ("Core item 2 (812 games)", "Enemy damage is mostly magic").
+    pub why: String,
+    /// It answers something in the enemy's (or the lane opponent's) items.
+    pub counter: bool,
+    /// Other items that fill this slot well, best first (the choice stays the player's).
+    pub alternatives: Vec<i64>,
 }
 
 /// An item's price from where the user stands. Only what the player can see goes in: their own gold and items, and

@@ -135,6 +135,10 @@ pub fn parse(m: &Value, timeline: Option<&Value>, rank: RankBand, me: Option<&st
         }
         let pid = int(&p["participantId"]).unwrap_or(k as i64 + 1);
         let puuid = p["puuid"].as_str().unwrap_or("").to_string();
+        let riot_id = match (p["riotIdGameName"].as_str(), p["riotIdTagline"].as_str()) {
+            (Some(n), Some(t)) if !n.is_empty() && !t.is_empty() => Some(format!("{n}#{t}")),
+            _ => None,
+        };
         let mut final_items = [0i64; 7];
         for (j, slot) in final_items.iter_mut().enumerate() {
             *slot = int(&p[format!("item{j}")]).unwrap_or(0).max(0);
@@ -144,7 +148,9 @@ pub fn parse(m: &Value, timeline: Option<&Value>, rank: RankBand, me: Option<&st
             role: p["teamPosition"].as_str().and_then(Role::from_riot),
             team: team as u16,
             win,
-            is_me: me.map(|me| !me.is_empty() && me == puuid).unwrap_or(false),
+            // `me`: the user's puuid and/or Riot ID ("Name#TAG"), one per line. Puuids differ between API keys from
+            // different accounts; the Riot ID doesn't.
+            is_me: me.map(|me| me.lines().map(str::trim).filter(|x| !x.is_empty()).any(|x| x == puuid || riot_id.as_deref().map(|r| r.eq_ignore_ascii_case(x)).unwrap_or(false))).unwrap_or(false),
             summoners: [int(&p["summoner1Id"]).unwrap_or(0), int(&p["summoner2Id"]).unwrap_or(0)],
             rune_style: int(&primary.unwrap()["style"]).unwrap_or(0),
             perks: [pp[0], pp[1], pp[2], pp[3]],

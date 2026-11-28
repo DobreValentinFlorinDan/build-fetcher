@@ -751,6 +751,9 @@ pub struct FetchStatus {
     /// Off-meta champion-roles the fetcher doesn't hunt ("Olaf UTILITY"), rarest first.
     #[serde(default)]
     pub skipped_pairs: Vec<String>,
+    /// The fetcher's newest error in the last hour (a failed request, a planning error).
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]

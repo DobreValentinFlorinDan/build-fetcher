@@ -483,6 +483,14 @@ impl Store {
         Ok(rows.filter_map(|x| x.ok()).filter_map(|(p, c)| crate::record::platform_from(c as u64).map(|pl| (p, pl))).collect())
     }
 
+    /// A player no API key in use can ask for: out of the pool and the champion lists.
+    pub fn forget_player(&self, puuid: &str) -> Result<()> {
+        let w = self.w.lock();
+        w.db.prepare_cached("DELETE FROM players WHERE puuid = ?")?.execute([puuid])?;
+        w.db.prepare_cached("DELETE FROM player_champs WHERE puuid = ?")?.execute([puuid])?;
+        Ok(())
+    }
+
     /// The fetcher checked this player's history now (players from player_champs join the pool here).
     pub fn mark_checked(&self, puuid: &str, platform: bf_core::build::Platform, rank: RankBand, now_ms: i64) -> Result<()> {
         let w = self.w.lock();

@@ -122,6 +122,8 @@ export type FetchStatus = {
   keyError: string | null;
   /** Off-meta champion-roles the fetcher doesn't hunt ("Olaf UTILITY"), rarest first. */
   skippedPairs?: string[];
+  /** The fetcher's newest error in the last hour. */
+  lastError?: string | null;
 };
 
 export type StorageStatus = {

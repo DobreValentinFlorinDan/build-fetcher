@@ -449,3 +449,47 @@ async fn off_meta_pairs_are_not_hunted_until_their_pick_rate_rises() {
     let back = thin_labels(FetcherConfig { min_pick_rate: rare_rate * 0.99, judge_after_games: 50, ..Default::default() });
     assert!(back.contains(&rare_label), "{back:?}");
 }
+
+/// Puuids are encrypted per API key's account: one seen with another key (or the League client's own) can't be asked
+/// for. Such a player leaves the pool after one try instead of being retried every few seconds, and the user's own
+/// games are found again through their Riot ID.
+#[tokio::test(start_paused = true)]
+async fn players_no_key_can_read_are_dropped_and_my_riot_id_is_looked_up_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = store(dir.path());
+    let games = synth(150);
+    let me = puuids(&games[0])[3].clone();
+    let fake = fake_world(&games);
+    // The League client's puuid for the user isn't readable; their Riot ID resolves to the readable one.
+    let client_puuid = "lcu-0000".to_string();
+    fake.foreign.lock().insert(client_puuid.clone());
+    fake.accounts.lock().insert("me#euw".into(), me.clone());
+    // Every other ladder player was seen with another account's key.
+    let ladder: Vec<String> = fake.ladders.lock()["EUW1:CHALLENGER"].iter().map(|e| e.puuid.clone()).collect();
+    let unreadable: HashSet<String> = ladder.iter().filter(|p| **p != me).step_by(2).cloned().collect();
+    fake.foreign.lock().extend(unreadable.iter().cloned());
+    let s = Settings { riot_id: Some("Me#EUW".into()), ..settings(Some(&client_puuid)) };
+    let f = Fetcher::with_clock(fake.clone(), st.clone(), s, FetcherConfig::default(), clock());
+    let (_tx, rx) = watch::channel(Activity::Idle);
+    let handles = f.spawn(rx);
+    tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+    f.stop();
+    for h in handles {
+        h.await.unwrap();
+    }
+    let lists = calls_of(&fake, "matchIdsPage");
+    let asked = |p: &str| lists.iter().filter(|c| c[1] == json!(p)).count();
+    // The client's puuid: asked once, then the Riot ID is resolved and the user's games come in with it.
+    assert_eq!(asked(&client_puuid), 1);
+    assert_eq!(calls_of(&fake, "accountByRiotId").len(), 1);
+    assert!(asked(&me) >= 1);
+    assert!(st.my_games().unwrap().len() > 0, "the user's games are stored as theirs");
+    // Each unreadable player: asked once, then dropped (here they turn up again in fetched games, which a real key
+    // switch wouldn't do, so a second try is allowed), not every few seconds as before.
+    for p in &unreadable {
+        assert!(asked(p) <= 2, "{p} asked {} times", asked(p));
+    }
+    assert!(unreadable.iter().any(|p| asked(p) == 1), "the ladder was reached");
+    // Games keep coming from the readable players.
+    assert!(f.status().matches_last_hour > 50, "{:?}", f.status());
+}

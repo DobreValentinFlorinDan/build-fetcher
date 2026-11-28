@@ -60,6 +60,7 @@ impl StoreHandle for FakeStore {
             current: Some("tier A champions".into()),
             key_error: None,
             skipped_pairs: vec!["Olaf UTILITY".into(), "Teemo JUNGLE".into()],
+            last_error: None,
         }
     }
     fn storage_status(&self) -> StorageStatus {

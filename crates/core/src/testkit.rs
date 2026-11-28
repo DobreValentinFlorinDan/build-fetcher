@@ -227,6 +227,8 @@ pub struct FakeRiot {
     pub parallel: std::sync::atomic::AtomicUsize,
     /// Match ids whose `get_match` fails (a server error that doesn't go away).
     pub failing: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Puuids no key can read (seen with a key from another account): `match_ids_page` fails with ForeignIdError.
+    pub foreign: parking_lot::Mutex<std::collections::HashSet<String>>,
 }
 
 impl FakeRiot {
@@ -287,6 +289,9 @@ impl crate::riot::client::RiotApi for FakeRiot {
     }
     async fn match_ids_page(&self, platform: &str, puuid: &str, q: &crate::riot::client::MatchIdQuery, _s: &crate::riot::rate_limiter::Signal) -> anyhow::Result<Vec<String>> {
         self.log("matchIdsPage", vec![json!(platform), json!(puuid), json!({ "queue": q.queue, "startTime": q.start_time, "start": q.start, "count": q.count, "fresh": q.fresh })]);
+        if self.foreign.lock().contains(puuid) {
+            return Err(anyhow::anyhow!(crate::riot::client::ForeignIdError("Riot API 400 on /lol/match/v5/matches: no API key in use can read this player id".into())));
+        }
         let since = q.start_time.map(|s| s * 1000).unwrap_or(i64::MIN);
         Ok(self.sorted(puuid, q.queue).into_iter().filter(|h| h.1 >= since).skip(q.start as usize).take(q.count as usize).map(|h| h.0).collect())
     }

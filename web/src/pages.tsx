@@ -237,6 +237,7 @@ export function FetchingPage({ status }: { status: Status | null }) {
               <Stat label="matches stored" value={count(f.matchesTotal)} />
             </div>
             {f.current && <p className="text-sm text-muted">Now: <span className="text-fg">{f.current}</span></p>}
+            {f.lastError && <p className="text-sm text-warn">Last error: <span className="break-all">{f.lastError}</span></p>}
             {f.keyError && <ErrorText>Riot refused the key ({f.keyError}). Get a new one at <a className="underline" href="https://developer.riotgames.com" target="_blank" rel="noreferrer">developer.riotgames.com</a> and paste it in Settings.</ErrorText>}
             <div className="space-y-3">
               <h3 className="text-xs uppercase tracking-wider text-muted">Requests per routing value</h3>

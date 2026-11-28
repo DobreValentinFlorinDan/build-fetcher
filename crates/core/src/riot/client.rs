@@ -23,6 +23,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// A player id (puuid) no key in use can read: Riot encrypts puuids per API key's app, so a puuid one key saw is a
+/// 400 for a key from another account. The player can't be asked for with these keys.
+#[derive(Debug)]
+pub struct ForeignIdError(pub String);
+impl std::fmt::Display for ForeignIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ForeignIdError {}
+
 /// The key was rejected (401 / 403): the lanes stop.
 #[derive(Debug)]
 pub struct RiotAuthError(pub String);
@@ -287,8 +298,9 @@ impl<T: Transport> RiotClient<T> {
 
     /// The key (and its limiter for `host`) the next request should use: the least busy key Riot hasn't rejected,
     /// the main key on a tie. None when every key was rejected.
-    fn pick(&self, host: &str, family: &'static str) -> Option<(String, Arc<RateLimiter>)> {
-        let keys: Vec<String> = self.keys.lock().iter().filter(|k| !k.rejected).map(|k| k.key.clone()).collect();
+    /// `skip`: keys already tried for this request.
+    fn pick(&self, host: &str, family: &'static str, skip: &[String]) -> Option<(String, Arc<RateLimiter>)> {
+        let keys: Vec<String> = self.keys.lock().iter().filter(|k| !k.rejected && !skip.contains(&k.key)).map(|k| k.key.clone()).collect();
         let mut best: Option<((usize, f64), String, Arc<RateLimiter>)> = None;
         for k in keys {
             let l = self.limiter(&k, host);
@@ -353,8 +365,13 @@ impl<T: Transport> RiotClient<T> {
 
     async fn get(&self, host: &str, family: &'static str, path: &str, signal: &Signal) -> Result<Option<Value>> {
         let mut attempt = 0;
+        // Keys that answered 400 to a puuid path: the puuid was made by another key's app, so try the next key.
+        let mut foreign: Vec<String> = Vec::new();
         loop {
-            let Some((key, limiter)) = self.pick(host, family) else {
+            let Some((key, limiter)) = self.pick(host, family, &foreign) else {
+                if !foreign.is_empty() {
+                    return Err(anyhow!(ForeignIdError(format!("Riot API 400 on {}: no API key in use can read this player id (it was seen with a key from another account)", path.split("/by-puuid/").next().unwrap_or(path)))));
+                }
                 return Err(anyhow!(RiotAuthError("Riot API rejected every key. Check the keys in Settings (developer.riotgames.com).".into())));
             };
             let permit = limiter.acquire(family, Some(signal)).await?;
@@ -407,6 +424,11 @@ impl<T: Transport> RiotClient<T> {
                 return Err(anyhow!(RiotAuthError(format!(
                     "Riot API rejected the key ({status}). Check the key in Settings (developer.riotgames.com)."
                 ))));
+            }
+            if status == 400 && path.contains("/by-puuid/") {
+                // Doesn't count as an attempt: each key is tried once.
+                foreign.push(key);
+                continue;
             }
             if status == 429 {
                 let scope = limit_scope(kind.as_deref());
@@ -756,5 +778,41 @@ mod tests {
         let e = c.get_match("EUW1", "EUW1_3", &Signal::new()).await.unwrap_err();
         assert!(e.downcast_ref::<RiotAuthError>().is_some());
         assert!(!format!("{e:?}").contains("22222222"), "{e:?}");
+    }
+
+    /// Riot answers 400 to a puuid one key's app didn't make; each key here reads only puuids starting with its tag.
+    struct KeyedRiot {
+        calls: Mutex<Vec<(String, u16)>>,
+    }
+    impl Transport for KeyedRiot {
+        async fn get(&self, url: &str, key: &str) -> Result<super::super::transport::RawAnswer> {
+            let tag = key.rsplit('-').next().unwrap_or("");
+            let status = match url.split("/by-puuid/").nth(1) {
+                Some(rest) if !rest.starts_with(tag) => 400,
+                _ => 200,
+            };
+            self.calls.lock().push((key.to_string(), status));
+            Ok(super::super::transport::RawAnswer { status, headers: vec![], body: (status == 200).then(|| json!(["EUW1_1"])) })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_puuid_from_another_keys_account_is_tried_on_each_key_then_reported() {
+        let clock = clock();
+        let c = Arc::new(RiotClient::with_transport("RGAPI-a", parse_limits(Some("20:1,100:120")), PACING, KeyedRiot { calls: Mutex::new(vec![]) }, clock));
+        c.set_api_keys(&["RGAPI-a".to_string(), "RGAPI-b".to_string()]);
+        let q = MatchIdQuery { queue: 420, start_time: None, start: 0, count: 20, fresh: true };
+        // Readable by one of the two keys: whichever is asked first, the answer comes back.
+        for puuid in ["a-player", "b-player"] {
+            let ids = c.match_ids_page("EUW1", puuid, &q, &Signal::new()).await.unwrap();
+            assert_eq!(ids, vec!["EUW1_1".to_string()], "{puuid}");
+        }
+        // Readable by neither: each key asked once, then ForeignIdError (not a key rejection: both keys still work).
+        c.transport().calls.lock().clear();
+        let e = c.match_ids_page("EUW1", "z-player", &q, &Signal::new()).await.unwrap_err();
+        assert!(e.downcast_ref::<ForeignIdError>().is_some(), "{e:?}");
+        assert!(!format!("{e}").contains("z-player"), "{e}");
+        assert_eq!(c.transport().calls.lock().len(), 2);
+        assert_eq!(c.key_count(), 2);
     }
 }

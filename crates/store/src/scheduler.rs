@@ -30,7 +30,7 @@ use crate::settings::Settings;
 use crate::store::{id_hash, Ingest, Outcome, Store};
 use anyhow::Result;
 use bf_core::build::{Activity, FetchStatus, MatchRecord, Platform, RankBand, Role, Routing};
-use bf_core::riot::client::{MatchIdQuery, RiotApi, RiotAuthError};
+use bf_core::riot::client::{ForeignIdError, MatchIdQuery, RiotApi, RiotAuthError};
 use bf_core::riot::rate_limiter::{wall_clock, Aborted, Clock, Signal};
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -109,6 +109,10 @@ struct State {
     matches: VecDeque<i64>,
     last_my_games: i64,
     me: Option<String>,
+    /// The Settings puuid (from the League client) can't be read by the keys in use: resolve the Riot ID instead.
+    settings_puuid_unusable: bool,
+    /// The newest fetcher error, with when (shown on the Fetching page).
+    last_error: Option<(i64, String)>,
     running: usize,
     /// The off-meta pairs skipped by the last plan ("Olaf UTILITY"), rarest first.
     skipped: Vec<String>,
@@ -272,12 +276,23 @@ impl<A: RiotApi + 'static> Fetcher<A> {
             current: (!current.is_empty()).then(|| current.join("; ")),
             key_error: st.key_error.clone(),
             skipped_pairs: st.skipped.clone(),
+            last_error: st.last_error.as_ref().filter(|e| e.0 >= now - HOUR_MS).map(|e| e.1.clone()),
         }
     }
 
     /// The user's puuid: from Settings, or resolved from their Riot ID.
     pub fn my_puuid(&self) -> Option<String> {
-        self.inner.settings.lock().puuid.clone().or_else(|| self.inner.st.lock().me.clone())
+        let st = self.inner.st.lock();
+        if st.settings_puuid_unusable {
+            return st.me.clone();
+        }
+        self.inner.settings.lock().puuid.clone().or_else(|| st.me.clone())
+    }
+
+    /// Who the user is in a game: their puuid and their Riot ID, one per line (see `parse::parse`).
+    fn me_ids(&self) -> Option<String> {
+        let ids: Vec<String> = self.my_puuid().into_iter().chain(self.inner.settings.lock().riot_id.clone()).collect();
+        (!ids.is_empty()).then(|| ids.join("\n"))
     }
 
     /// Tier A now: the Settings list, the user's top champions by games, and any played 3 times on the newest patch.
@@ -489,6 +504,7 @@ impl<A: RiotApi + 'static> Fetcher<A> {
                 }
                 Err(e) => {
                     self.inner.store.log(format!("fetcher ({routing:?}): {e}"));
+                    self.inner.st.lock().last_error = Some((self.now(), e.to_string()));
                     self.idle(routing, Some(self.inner.cfg.error_backoff_ms), &mut activity).await;
                 }
             }
@@ -549,8 +565,25 @@ impl<A: RiotApi + 'static> Fetcher<A> {
                 let since = self.inner.store.newest_mine_ms()?.map(|t| t + 1000).unwrap_or(self.now() - 30 * 24 * HOUR_MS);
                 let q = MatchIdQuery { queue: parse::QUEUE_RANKED_SOLO, start_time: Some(since / 1000), start: 0, count: self.inner.cfg.ids_per_player, fresh: true };
                 self.note_request();
-                let ids = api.match_ids_page(platform.as_str(), puuid, &q, signal).await?;
-                self.fetch_matches(*platform, &ids, RankBand::Mine, Some(puuid), signal).await?;
+                let ids = match api.match_ids_page(platform.as_str(), puuid, &q, signal).await {
+                    Ok(ids) => ids,
+                    Err(e) if e.downcast_ref::<ForeignIdError>().is_some() => {
+                        // The League client's puuid (or one resolved with an old key) isn't readable by these keys:
+                        // look the Riot ID up again with them. Without a Riot ID, wait for the next round.
+                        let mut st = self.inner.st.lock();
+                        st.settings_puuid_unusable = true;
+                        st.me = None;
+                        if self.inner.settings.lock().riot_id.is_none() {
+                            st.last_my_games = self.now();
+                        }
+                        drop(st);
+                        self.inner.store.log("fetcher: your puuid can't be read with the keys in use; looking up your Riot ID again".to_string());
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                };
+                let me = self.me_ids();
+                self.fetch_matches(*platform, &ids, RankBand::Mine, me.as_deref().or(Some(puuid.as_str())), signal).await?;
                 self.inner.st.lock().last_my_games = self.now();
                 let tier_a = self.tier_a()?;
                 if tier_a != self.inner.store.tier_a() {
@@ -559,11 +592,20 @@ impl<A: RiotApi + 'static> Fetcher<A> {
             }
             Work::Player { puuid, platform, rank, .. } => {
                 let q = MatchIdQuery { queue: parse::QUEUE_RANKED_SOLO, start_time: Some((self.now() - self.inner.cfg.history_ms) / 1000), start: 0, count: self.inner.cfg.ids_per_player, fresh: true };
-                self.note_request();
-                let ids = api.match_ids_page(platform.as_str(), puuid, &q, signal).await?;
-                // Checked even if the matches fail below: a broken history shouldn't be asked for again at once.
+                // Checked even if the request fails: a broken history shouldn't be asked for again at once.
                 self.inner.store.mark_checked(puuid, *platform, *rank, self.now())?;
-                let me = self.my_puuid();
+                self.note_request();
+                let ids = match api.match_ids_page(platform.as_str(), puuid, &q, signal).await {
+                    Ok(ids) => ids,
+                    Err(e) if e.downcast_ref::<ForeignIdError>().is_some() => {
+                        // Seen with a key from another account (or one no longer in use): no key here can ask for
+                        // this player, so they leave the pool instead of being asked again and again.
+                        self.inner.store.forget_player(puuid)?;
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                };
+                let me = self.me_ids();
                 self.fetch_matches(*platform, &ids, *rank, me.as_deref(), signal).await?;
             }
             Work::Pool { platform, rank } => {
